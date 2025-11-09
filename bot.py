@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import aiohttp
 from datetime import date
 from typing import Optional
 
@@ -9,11 +10,12 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from config import BOT_TOKEN
 from database import Database
 from models import User
+from openrouter_config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +31,7 @@ class UserRegistration(StatesGroup):
     waiting_for_city = State()
     waiting_for_referral = State()
     waiting_for_goal = State()
+    waiting_for_goal_confirmation = State()
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -106,6 +109,58 @@ def get_language_emoji(language_code: str) -> str:
         "en": "🇺🇸 English"
     }
     return emoji_map.get(language_code, language_code)
+
+async def improve_goal_with_ai(goal: str) -> str:
+    """Улучшает формулировку цели с помощью OpenRouter API"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": DEFAULT_MODEL,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Улучши формулировку этой цели: {goal}"}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://t.me/motivation_bot",
+                "X-Title": "Motivation Bot"
+            }
+
+            async with session.post(
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                json=payload,
+                headers=headers
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    improved_goal = data["choices"][0]["message"]["content"].strip()
+                    return improved_goal
+                else:
+                    logger.error(f"OpenRouter API error: {response.status}")
+                    return goal  # Возвращаем оригинальную цель в случае ошибки
+
+    except Exception as e:
+        logger.error(f"Error calling OpenRouter API: {e}")
+        return goal  # Возвращаем оригинальную цель в случае ошибки
+
+def create_goal_confirmation_keyboard() -> InlineKeyboardMarkup:
+    """Создание inline клавиатуры для подтверждения цели"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Я уверен", callback_data="goal_confirm"),
+                InlineKeyboardButton(text="🤖 ИИ улучшение", callback_data="goal_improve")
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Изменить", callback_data="goal_edit")
+            ]
+        ]
+    )
 
 def validate_date(date_str: str) -> Optional[date]:
     """Валидация даты рождения в формате ДД.ММ.ГГГГ"""
@@ -435,17 +490,73 @@ async def process_goal(message: Message, state: FSMContext):
         )
         return
 
-    # Сохраняем цель
+    # Сохраняем цель во временном состоянии
     await state.update_data(goal=goal)
+    await state.set_state(UserRegistration.waiting_for_goal_confirmation)
 
+    await message.answer(
+        f"🎯 Ваша цель:\n\n<i>{goal}</i>\n\n"
+        f"Уверены ли вы в этой формулировке?",
+        reply_markup=create_goal_confirmation_keyboard()
+    )
+
+@router.callback_query(UserRegistration.waiting_for_goal_confirmation)
+async def process_goal_confirmation(callback: CallbackQuery, state: FSMContext):
+    """Обработка подтверждения цели"""
+    await callback.answer()  # Убираем часики загрузки
+
+    action = callback.data
+
+    if action == "goal_confirm":
+        # Пользователь подтвердил цель - завершаем регистрацию
+        await finalize_registration(callback.message, state)
+
+    elif action == "goal_improve":
+        # Улучшаем цель с помощью ИИ
+        data = await state.get_data()
+        original_goal = data.get('goal', '')
+
+        # Отправляем сообщение о том, что ИИ работает
+        await callback.message.edit_text(
+            f"🎯 Ваша цель:\n\n<i>{original_goal}</i>\n\n"
+            f"🤖 Улучшаю формулировку с помощью ИИ...",
+            reply_markup=None
+        )
+
+        # Вызываем OpenRouter API
+        improved_goal = await improve_goal_with_ai(original_goal)
+
+        # Сохраняем улучшенную цель
+        await state.update_data(goal=improved_goal)
+
+        # Показываем улучшенную цель с той же клавиатурой
+        await callback.message.edit_text(
+            f"🎯 Улучшенная цель:\n\n<i>{improved_goal}</i>\n\n"
+            f"Теперь лучше звучит? Что скажете?",
+            reply_markup=create_goal_confirmation_keyboard()
+        )
+
+    elif action == "goal_edit":
+        # Возвращаемся к вводу цели
+        await state.set_state(UserRegistration.waiting_for_goal)
+        await callback.message.edit_text(
+            "🎯 Хорошо, давайте переформулируем цель.\n\n"
+            "Расскажите о вашей главной цели:",
+            reply_markup=None
+        )
+
+async def finalize_registration(message: Message, state: FSMContext):
+    """Завершение регистрации пользователя"""
+    data = await state.get_data()
+
+    # Сохраняем данные в базу
     telegram_id = message.from_user.id
     user = await db.get_user(telegram_id)
     if user:
-        user.goal = goal
+        user.goal = data.get('goal')
         await db.save_user(user)
 
-    # Получаем все данные пользователя
-    data = await state.get_data()
+    # Получаем все данные для финального сообщения
     name = data.get('name', 'Пользователь')
     language = data.get('language', 'ru')
     referral_code = data.get('referral_code')
@@ -455,7 +566,7 @@ async def process_goal(message: Message, state: FSMContext):
 
     referral_text = f"📢 Реферальный код: {referral_code}\n" if referral_code else ""
 
-    await message.answer(
+    await message.edit_text(
         f"🎉 Регистрация завершена! Добро пожаловать в команду изменений!\n\n"
         f"🌐 Язык: {get_language_emoji(language)}\n"
         f"👤 Имя: {name}\n"
@@ -464,10 +575,10 @@ async def process_goal(message: Message, state: FSMContext):
         f"⚖️ Вес: {data.get('weight')} кг\n"
         f"🏙️ Город: {data.get('city')}\n"
         f"{referral_text}"
-        f"🎯 Цель: {goal}\n\n"
+        f"🎯 Цель: {data.get('goal')}\n\n"
         f"🚀 Теперь я буду помогать тебе достигать своей цели! "
         f"Каждый день я буду предлагать персональные задания. Используй /help для получения дополнительной информации.",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=None
     )
 
 @router.message(Command("help"))
