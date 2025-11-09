@@ -11,6 +11,8 @@ class User:
     height: Optional[float] = None
     weight: Optional[float] = None
     city: Optional[str] = None
+    referral_code: Optional[str] = None
+    goal: Optional[str] = None
 
     @property
     def is_complete(self) -> bool:

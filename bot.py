@@ -27,6 +27,8 @@ class UserRegistration(StatesGroup):
     waiting_for_height = State()
     waiting_for_weight = State()
     waiting_for_city = State()
+    waiting_for_referral = State()
+    waiting_for_goal = State()
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -144,6 +146,9 @@ async def cmd_start(message: Message, state: FSMContext):
     if existing_user and existing_user.is_complete:
         # Пользователь уже зарегистрирован
         language_emoji = get_language_emoji(existing_user.language)
+        referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
+        goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
+
         await message.answer(
             f"С возвращением, {existing_user.name}! 👋\n\n"
             f"Ты уже в нашей команде изменений!\n\n"
@@ -152,7 +157,9 @@ async def cmd_start(message: Message, state: FSMContext):
             f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
             f"📏 Рост: {existing_user.height} см\n"
             f"⚖️ Вес: {existing_user.weight} кг\n"
-            f"🏙️ Город: {existing_user.city}\n\n"
+            f"🏙️ Город: {existing_user.city}\n"
+            f"{referral_text}"
+            f"{goal_text}\n"
             f"Готов продолжить путь к целям? Используй /update для обновления данных."
         )
     else:
@@ -379,13 +386,74 @@ async def process_city(message: Message, state: FSMContext):
         user.city = city
         await db.save_user(user)
 
+    await state.set_state(UserRegistration.waiting_for_referral)
+    await message.answer(
+        f"Город сохранен: {city}\n\n"
+        "📢 Откуда вы узнали о нашем боте? Если у вас есть реферальный код блогера, "
+        "введите его. Если нет - просто нажмите 'Пропустить':",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Пропустить")]],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+    )
+
+@router.message(UserRegistration.waiting_for_referral)
+async def process_referral(message: Message, state: FSMContext):
+    """Обработка реферального кода"""
+    referral_code = message.text.strip()
+
+    if referral_code.lower() == "пропустить":
+        referral_code = None
+
+    # Сохраняем реферальный код (или None)
+    await state.update_data(referral_code=referral_code)
+
+    telegram_id = message.from_user.id
+    user = await db.get_user(telegram_id)
+    if user:
+        user.referral_code = referral_code
+        await db.save_user(user)
+
+    await state.set_state(UserRegistration.waiting_for_goal)
+    await message.answer(
+        "Спасибо за информацию!\n\n"
+        "🎯 Теперь расскажите о вашей главной цели! Что вы хотите достичь?\n"
+        "(например: накачаться, научиться программированию, похудеть, "
+        "научиться английскому, развить уверенность в себе и т.д.)",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+@router.message(UserRegistration.waiting_for_goal)
+async def process_goal(message: Message, state: FSMContext):
+    """Обработка цели пользователя"""
+    goal = message.text.strip()
+
+    if len(goal) < 3:
+        await message.answer(
+            "Пожалуйста, опишите вашу цель более подробно (минимум 3 символа):"
+        )
+        return
+
+    # Сохраняем цель
+    await state.update_data(goal=goal)
+
+    telegram_id = message.from_user.id
+    user = await db.get_user(telegram_id)
+    if user:
+        user.goal = goal
+        await db.save_user(user)
+
     # Получаем все данные пользователя
     data = await state.get_data()
     name = data.get('name', 'Пользователь')
     language = data.get('language', 'ru')
+    referral_code = data.get('referral_code')
 
     # Очищаем состояние
     await state.clear()
+
+    referral_text = f"📢 Реферальный код: {referral_code}\n" if referral_code else ""
 
     await message.answer(
         f"🎉 Регистрация завершена! Добро пожаловать в команду изменений!\n\n"
@@ -394,8 +462,11 @@ async def process_city(message: Message, state: FSMContext):
         f"📅 Дата рождения: {data.get('birth_date').strftime('%d.%m.%Y') if data.get('birth_date') else 'Не указана'}\n"
         f"📏 Рост: {data.get('height')} см\n"
         f"⚖️ Вес: {data.get('weight')} кг\n"
-        f"🏙️ Город: {city}\n\n"
-        f"🚀 Теперь я буду помогать тебе достигать целей! Используй /help для получения дополнительной информации.",
+        f"🏙️ Город: {data.get('city')}\n"
+        f"{referral_text}"
+        f"🎯 Цель: {goal}\n\n"
+        f"🚀 Теперь я буду помогать тебе достигать своей цели! "
+        f"Каждый день я буду предлагать персональные задания. Используй /help для получения дополнительной информации.",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -416,8 +487,10 @@ async def cmd_help(message: Message):
         "• Дата рождения (ДД.ММ.ГГГГ)\n"
         "• Рост (в см)\n"
         "• Вес (в кг)\n"
-        "• Город\n\n"
-        "Все данные сохраняются в базе данных и используются для персонализации заданий."
+        "• Город\n"
+        "• Реферальный код (опционально)\n"
+        "• Главная цель\n\n"
+        "Все данные сохраняются в базе данных и используются для персонализации заданий и отслеживания прогресса."
     )
     await message.answer(help_text)
 

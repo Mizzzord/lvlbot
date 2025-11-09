@@ -22,15 +22,31 @@ class Database:
                     height REAL,
                     weight REAL,
                     city TEXT,
+                    referral_code TEXT,
+                    goal TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
-            # Добавляем колонку language, если ее нет (для существующих баз данных)
+            # Добавляем недостающие колонки (для существующих баз данных)
             try:
                 await db.execute('ALTER TABLE users ADD COLUMN language TEXT')
                 logger.info("Колонка language добавлена в таблицу")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+            try:
+                await db.execute('ALTER TABLE users ADD COLUMN referral_code TEXT')
+                logger.info("Колонка referral_code добавлена в таблицу")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+            try:
+                await db.execute('ALTER TABLE users ADD COLUMN goal TEXT')
+                logger.info("Колонка goal добавлена в таблицу")
             except aiosqlite.OperationalError:
                 # Колонка уже существует
                 pass
@@ -64,7 +80,9 @@ class Database:
                     birth_date=birth_date,
                     height=row['height'],
                     weight=row['weight'],
-                    city=row['city']
+                    city=row['city'],
+                    referral_code=row['referral_code'],
+                    goal=row['goal']
                 )
             return None
 
@@ -75,8 +93,8 @@ class Database:
             birth_date_str = user.birth_date.isoformat() if user.birth_date else None
 
             await db.execute('''
-                INSERT INTO users (telegram_id, language, name, birth_date, height, weight, city, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO users (telegram_id, language, name, birth_date, height, weight, city, referral_code, goal, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(telegram_id) DO UPDATE SET
                     language = excluded.language,
                     name = excluded.name,
@@ -84,6 +102,8 @@ class Database:
                     height = excluded.height,
                     weight = excluded.weight,
                     city = excluded.city,
+                    referral_code = excluded.referral_code,
+                    goal = excluded.goal,
                     updated_at = CURRENT_TIMESTAMP
             ''', (
                 user.telegram_id,
@@ -92,7 +112,9 @@ class Database:
                 birth_date_str,
                 user.height,
                 user.weight,
-                user.city
+                user.city,
+                user.referral_code,
+                user.goal
             ))
             await db.commit()
             logger.info(f"Пользователь {user.telegram_id} сохранен")
@@ -135,6 +157,8 @@ class Database:
                     birth_date=birth_date,
                     height=row['height'],
                     weight=row['weight'],
-                    city=row['city']
+                    city=row['city'],
+                    referral_code=row['referral_code'],
+                    goal=row['goal']
                 ))
             return users
