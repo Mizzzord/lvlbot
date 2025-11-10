@@ -3,7 +3,7 @@ import datetime
 import logging
 from datetime import date
 from typing import Optional
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +94,44 @@ class Database:
                 )
             ''')
 
+            # Создаем таблицу ежедневных заданий
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS daily_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    task_description TEXT,
+                    created_at INTEGER,
+                    expires_at INTEGER,
+                    completed BOOLEAN DEFAULT FALSE,
+                    completed_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id)
+                )
+            ''')
+
+            # Создаем таблицу пользовательских статистик
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_stats (
+                    user_id INTEGER PRIMARY KEY,
+                    level INTEGER DEFAULT 1,
+                    experience INTEGER DEFAULT 0,
+                    rank TEXT DEFAULT 'F',
+                    current_streak INTEGER DEFAULT 0,
+                    best_streak INTEGER DEFAULT 0,
+                    total_tasks_completed INTEGER DEFAULT 0,
+                    last_task_date INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id)
+                )
+            ''')
+
             # Создаем индексы для производительности
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_player_stats_user_id ON player_stats(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_daily_tasks_user_id ON daily_tasks(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_daily_tasks_expires_at ON daily_tasks(expires_at)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_stats_rank ON user_stats(rank)')
 
             # Добавляем недостающие колонки для существующих баз данных
             await self._add_missing_columns(db)
@@ -563,3 +595,145 @@ class Database:
                     updated_at=row['updated_at']
                 )
             return None
+
+    # Методы для работы с ежедневными заданиями
+
+    async def save_daily_task(self, task: DailyTask) -> int:
+        """Сохранение ежедневного задания"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO daily_tasks (user_id, task_description, created_at, expires_at, completed, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                task.user_id,
+                task.task_description,
+                task.created_at,
+                task.expires_at,
+                task.completed,
+                task.completed_at
+            ))
+            task_id = cursor.lastrowid
+            await db.commit()
+            logger.info(f"Ежедневное задание для пользователя {task.user_id} сохранено")
+            return task_id
+
+    async def get_active_daily_task(self, user_id: int) -> Optional[DailyTask]:
+        """Получение активного ежедневного задания пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM daily_tasks
+                WHERE user_id = ? AND completed = FALSE AND expires_at > ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            ''', (user_id, int(datetime.datetime.now().timestamp())))
+
+            row = await cursor.fetchone()
+            if row:
+                return DailyTask(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    task_description=row['task_description'],
+                    created_at=row['created_at'],
+                    expires_at=row['expires_at'],
+                    completed=row['completed'],
+                    completed_at=row['completed_at']
+                )
+            return None
+
+    async def complete_daily_task(self, task_id: int) -> bool:
+        """Отметить задание как выполненное"""
+        async with aiosqlite.connect(self.db_path) as db:
+            current_time = int(datetime.datetime.now().timestamp())
+            cursor = await db.execute('''
+                UPDATE daily_tasks
+                SET completed = TRUE, completed_at = ?
+                WHERE id = ?
+            ''', (current_time, task_id))
+            await db.commit()
+
+            if cursor.rowcount > 0:
+                logger.info(f"Задание {task_id} отмечено как выполненное")
+                return True
+            return False
+
+    # Методы для работы со статистикой пользователей
+
+    async def save_user_stats(self, stats: UserStats):
+        """Сохранение или обновление статистики пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO user_stats (user_id, level, experience, rank, current_streak, best_streak, total_tasks_completed, last_task_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    level = excluded.level,
+                    experience = excluded.experience,
+                    rank = excluded.rank,
+                    current_streak = excluded.current_streak,
+                    best_streak = excluded.best_streak,
+                    total_tasks_completed = excluded.total_tasks_completed,
+                    last_task_date = excluded.last_task_date
+            ''', (
+                stats.user_id,
+                stats.level,
+                stats.experience,
+                stats.rank.value,
+                stats.current_streak,
+                stats.best_streak,
+                stats.total_tasks_completed,
+                stats.last_task_date
+            ))
+            await db.commit()
+            logger.info(f"Статистика пользователя {stats.user_id} сохранена")
+
+    async def get_user_stats(self, user_id: int) -> Optional[UserStats]:
+        """Получение статистики пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM user_stats WHERE user_id = ?
+            ''', (user_id,))
+
+            row = await cursor.fetchone()
+            if row:
+                return UserStats(
+                    user_id=row['user_id'],
+                    level=row['level'],
+                    experience=row['experience'],
+                    rank=Rank(row['rank']),
+                    current_streak=row['current_streak'],
+                    best_streak=row['best_streak'],
+                    total_tasks_completed=row['total_tasks_completed'],
+                    last_task_date=row['last_task_date']
+                )
+            return None
+
+    async def get_top_users_by_city(self, city: str, limit: int = 10) -> list[tuple]:
+        """Получение топ пользователей по городу (по уровню)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT u.name, us.level, us.experience, us.rank
+                FROM users u
+                JOIN user_stats us ON u.telegram_id = us.user_id
+                WHERE u.city = ? AND u.subscription_active = TRUE
+                ORDER BY us.level DESC, us.experience DESC
+                LIMIT ?
+            ''', (city, limit))
+
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3]) for row in rows]
+
+    async def get_top_users_by_rank(self, rank: str, limit: int = 10) -> list[tuple]:
+        """Получение топ пользователей по рангу"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT u.name, us.level, us.experience, u.city
+                FROM users u
+                JOIN user_stats us ON u.telegram_id = us.user_id
+                WHERE us.rank = ? AND u.subscription_active = TRUE
+                ORDER BY us.level DESC, us.experience DESC
+                LIMIT ?
+            ''', (rank, limit))
+
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3]) for row in rows]

@@ -19,7 +19,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKey
 
 from config import BOT_TOKEN
 from database import Database
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats
 from openrouter_config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
 from subscription_config import SUBSCRIPTION_PLANS
 from wata_api import wata_create_payment, wata_check_payment
@@ -42,6 +42,7 @@ class UserRegistration(StatesGroup):
     waiting_for_subscription = State()
     waiting_for_payment = State()
     waiting_for_player_photo = State()
+    main_menu = State()
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -228,6 +229,23 @@ async def skip_payment_process(callback: CallbackQuery, state: FSMContext):
         f"После анализа будет создана ваша уникальная игровая карточка!",
         parse_mode="HTML",
         reply_markup=None
+    )
+
+async def show_main_menu(message: Message):
+    """Показать главное меню пользователя"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
+        [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="🎁 Призы", callback_data="prizes")],
+        [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")]
+    ])
+
+    await message.answer(
+        "🎮 <b>Главное меню</b>\n\n"
+        "Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=keyboard
     )
 
 async def analyze_player_photo(photo_bytes: bytes) -> dict:
@@ -480,7 +498,7 @@ async def create_player_card_image(photo_path: str, nickname: str, experience: i
 
         # Нижний декор
         footer_y = card_height - 100
-        footer_text = "Создано с помощью ИИ"
+        footer_text = "© Motivation Bot"
         footer_font_size = 20
         try:
             footer_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", footer_font_size)
@@ -591,37 +609,52 @@ async def cmd_start(message: Message, state: FSMContext):
         else:
             subscription_text = "💎 Подписка: Не активна\n"
 
-        # Проверяем статы игрока
+        # Проверяем, есть ли карточка игрока
         player_stats = await db.get_player_stats(telegram_id)
-        stats_text = ""
-        if player_stats:
-            stats_text = (
-                f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
-                f"⭐ Опыт: {player_stats.experience}\n\n"
-                f"🏆 <b>Характеристики:</b>\n"
-                f"💪 Сила: {player_stats.strength}/100\n"
-                f"🤸 Ловкость: {player_stats.agility}/100\n"
-                f"🏃 Выносливость: {player_stats.endurance}/100\n"
-                f"🧠 Интеллект: {player_stats.intelligence}/100\n"
-                f"✨ Харизма: {player_stats.charisma}/100\n"
-            )
 
-        await message.answer(
-            f"С возвращением, {existing_user.name}! 👋\n\n"
-            f"Ты уже в нашей команде изменений!\n\n"
-            f"🌐 Язык: {language_emoji}\n"
-            f"👤 Имя: {existing_user.name}\n"
-            f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
-            f"📏 Рост: {existing_user.height} см\n"
-            f"⚖️ Вес: {existing_user.weight} кг\n"
-            f"🏙️ Город: {existing_user.city}\n"
-            f"{referral_text}"
-            f"{goal_text}"
-            f"{subscription_text}"
-            f"{stats_text}\n"
-            f"Готов продолжить путь к целям? Используй /update для обновления данных.",
-            parse_mode="HTML"
-        )
+        if player_stats:
+            # У пользователя есть карточка игрока - показываем главное меню
+            user_statistics = await db.get_user_stats(telegram_id)
+            await message.answer(
+                f"С возвращением, {existing_user.name}! 👋\n\n"
+                f"🎮 Ваша игровая карточка активна!\n\n"
+                f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
+                f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
+                f"Готов продолжить приключения?",
+                parse_mode="HTML"
+            )
+            await show_main_menu(message)
+        else:
+            # У пользователя нет карточки - показываем обычное приветствие
+            stats_text = ""
+            if player_stats:
+                stats_text = (
+                    f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
+                    f"⭐ Опыт: {player_stats.experience}\n\n"
+                    f"🏆 <b>Характеристики:</b>\n"
+                    f"💪 Сила: {player_stats.strength}/100\n"
+                    f"🤸 Ловкость: {player_stats.agility}/100\n"
+                    f"🏃 Выносливость: {player_stats.endurance}/100\n"
+                    f"🧠 Интеллект: {player_stats.intelligence}/100\n"
+                    f"✨ Харизма: {player_stats.charisma}/100\n"
+                )
+
+            await message.answer(
+                f"С возвращением, {existing_user.name}! 👋\n\n"
+                f"Ты уже в нашей команде изменений!\n\n"
+                f"🌐 Язык: {language_emoji}\n"
+                f"👤 Имя: {existing_user.name}\n"
+                f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
+                f"📏 Рост: {existing_user.height} см\n"
+                f"⚖️ Вес: {existing_user.weight} кг\n"
+                f"🏙️ Город: {existing_user.city}\n"
+                f"{referral_text}"
+                f"{goal_text}"
+                f"{subscription_text}"
+                f"{stats_text}\n"
+                f"Готов продолжить путь к целям? Используй /update для обновления данных.",
+                parse_mode="HTML"
+            )
     else:
         # Получаем имя пользователя из Telegram
         user_name = message.from_user.first_name or "друг"
@@ -1229,24 +1262,48 @@ async def process_player_photo(message: Message, state: FSMContext):
         # Сохраняем статы в базу данных
         await db.save_player_stats(player_stats)
 
-        # Очищаем состояние
-        await state.clear()
+        # Создаем начальную статистику пользователя
+        user_statistics = UserStats(
+            user_id=user_id,
+            level=1,
+            experience=0,
+            rank=Rank.F,
+            current_streak=0,
+            best_streak=0,
+            total_tasks_completed=0
+        )
+        await db.save_user_stats(user_statistics)
 
-        # Показываем результаты и отправляем изображение карточки
+        # Отправляем изображение карточки
+        try:
+            with open(card_image_path, 'rb') as card_file:
+                await message.answer_photo(
+                    card_file,
+                    caption="🎮 <b>Ваша игровая карточка создана!</b>",
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить изображение карточки: {e}")
+            await message.answer("⚠️ Карточка создана, но изображение не удалось отправить.")
+
+        # Показываем характеристики
         await message.answer(
-            f"🎮 <b>Карточка игрока создана!</b>\n\n"
             f"🏆 <b>Ник:</b> {nickname}\n"
-            f"⭐ <b>Опыт:</b> 0\n\n"
-            f"🏆 <b>Ваши характеристики:</b>\n"
-            f"💪 <b>Сила:</b> {stats['strength']}/100\n"
-            f"🤸 <b>Ловкость:</b> {stats['agility']}/100\n"
-            f"🏃 <b>Выносливость:</b> {stats['endurance']}/100\n"
-            f"🧠 <b>Интеллект:</b> 50/100\n"
-            f"✨ <b>Харизма:</b> 50/100\n\n"
-            f"🚀 Теперь вы готовы к приключениям!\n"
-            f"Используйте /start для доступа ко всем функциям бота.",
+            f"⭐ <b>Опыт:</b> 0 | 📊 <b>Уровень:</b> 1 | 🏅 <b>Ранг:</b> F\n\n"
+            f"🏆 <b>Характеристики:</b>\n"
+            f"💪 Сила: {stats['strength']}/100\n"
+            f"🤸 Ловкость: {stats['agility']}/100\n"
+            f"🏃 Выносливость: {stats['endurance']}/100\n"
+            f"🧠 Интеллект: 50/100\n"
+            f"✨ Харизма: 50/100\n\n"
+            f"🎯 <b>Добро пожаловать в игру!</b>\n"
+            f"Теперь у вас есть доступ ко всем функциям бота.",
             parse_mode="HTML"
         )
+
+        # Переходим в главное меню
+        await state.set_state(UserRegistration.main_menu)
+        await show_main_menu(message)
 
         logger.info(f"Карточка игрока создана для пользователя {user_id}: ник={nickname}, сила={stats['strength']}, ловкость={stats['agility']}, выносливость={stats['endurance']}")
 
@@ -1264,6 +1321,571 @@ async def process_player_photo_invalid(message: Message):
         "📸 Пожалуйста, загрузите ваше фото для создания карточки игрока.\n\n"
         "Отправьте фото в чат."
     )
+
+# Обработчики главного меню
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "get_task")
+async def handle_get_task(callback: CallbackQuery, state: FSMContext):
+    """Обработка получения задания"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Проверяем, есть ли уже активное задание
+    active_task = await db.get_active_daily_task(user_id)
+    if active_task:
+        await callback.message.edit_text(
+            "❌ <b>У вас уже есть активное задание!</b>\n\n"
+            "Сначала выполните текущее задание или дождитесь его истечения.\n\n"
+            "Используйте кнопку '📋 Активные задания' для просмотра.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+        return
+
+    # Получаем цель пользователя для генерации задания
+    user = await db.get_user(user_id)
+    if not user or not user.goal:
+        await callback.message.edit_text(
+            "❌ <b>Цель не установлена!</b>\n\n"
+            "Сначала установите цель с помощью команды /start",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+        return
+
+    # Генерируем задание через ИИ
+    task_description = await generate_daily_task(user.goal)
+
+    # Создаем задание
+    current_time = int(datetime.datetime.now().timestamp())
+    expires_at = current_time + (24 * 60 * 60)  # 24 часа
+
+    task = DailyTask(
+        user_id=user_id,
+        task_description=task_description,
+        created_at=current_time,
+        expires_at=expires_at,
+        completed=False
+    )
+
+    task_id = await db.save_daily_task(task)
+
+    await callback.message.edit_text(
+        f"🎯 <b>Новое задание получено!</b>\n\n"
+        f"📝 <b>Задание:</b>\n{task_description}\n\n"
+        f"⏰ <b>Время на выполнение:</b> 24 часа\n"
+        f"🏆 <b>Награда:</b> +10 опыта, +1 к стрику\n\n"
+        f"Удачи в выполнении!",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
+            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+        ])
+    )
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "active_tasks")
+async def handle_active_tasks(callback: CallbackQuery, state: FSMContext):
+    """Обработка просмотра активных заданий"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Получаем активное задание
+    active_task = await db.get_active_daily_task(user_id)
+
+    if not active_task:
+        await callback.message.edit_text(
+            "📋 <b>Активных заданий нет</b>\n\n"
+            "У вас нет активных заданий. Получите новое задание!",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+        return
+
+    # Рассчитываем оставшееся время
+    current_time = int(datetime.datetime.now().timestamp())
+    time_left = active_task.expires_at - current_time
+
+    if time_left <= 0:
+        # Задание истекло
+        await callback.message.edit_text(
+            "⏰ <b>Задание истекло!</b>\n\n"
+            "К сожалению, время на выполнение задания вышло.\n"
+            "Получите новое задание!",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+        return
+
+    # Форматируем время
+    hours = time_left // 3600
+    minutes = (time_left % 3600) // 60
+
+    await callback.message.edit_text(
+        f"📋 <b>Ваше активное задание</b>\n\n"
+        f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
+        f"⏰ <b>Осталось времени:</b> {hours}ч {minutes}мин\n"
+        f"🏆 <b>Награда:</b> +10 опыта, +1 к стрику\n\n"
+        f"Сделайте задание и отметьте его как выполненное!",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отметить выполненным", callback_data=f"complete_task_{active_task.id}")],
+            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+        ])
+    )
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "profile")
+async def handle_profile(callback: CallbackQuery, state: FSMContext):
+    """Обработка просмотра профиля"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+    player_stats = await db.get_player_stats(user_id)
+    user_statistics = await db.get_user_stats(user_id)
+
+    if not user or not player_stats or not user_statistics:
+        await callback.message.edit_text(
+            "❌ <b>Ошибка загрузки профиля</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+        return
+
+    # Показываем профиль с подменю
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Рейтинг", callback_data="rating")],
+        [InlineKeyboardButton(text="📸 Заменить фотографию", callback_data="change_photo")],
+        [InlineKeyboardButton(text="💳 Оплата", callback_data="payment_info")],
+        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")],
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+    ])
+
+    await callback.message.edit_text(
+        f"👤 <b>Профиль игрока</b>\n\n"
+        f"🏆 <b>Ник:</b> {player_stats.nickname}\n"
+        f"⭐ <b>Опыт:</b> {user_statistics.experience} | 📊 <b>Уровень:</b> {user_statistics.level}\n"
+        f"🏅 <b>Ранг:</b> {user_statistics.rank.value} | 🔥 <b>Стрик:</b> {user_statistics.current_streak} дней\n"
+        f"🎯 <b>Лучший стрик:</b> {user_statistics.best_streak} дней\n"
+        f"✅ <b>Выполнено заданий:</b> {user_statistics.total_tasks_completed}\n\n"
+        f"🏆 <b>Характеристики:</b>\n"
+        f"💪 Сила: {player_stats.strength}/100\n"
+        f"🤸 Ловкость: {player_stats.agility}/100\n"
+        f"🏃 Выносливость: {player_stats.endurance}/100\n"
+        f"🧠 Интеллект: {player_stats.intelligence}/100\n"
+        f"✨ Харизма: {player_stats.charisma}/100\n\n"
+        f"🎯 <b>Цель:</b> {user.goal if user.goal else 'Не установлена'}\n\n"
+        f"Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "prizes")
+async def handle_prizes(callback: CallbackQuery, state: FSMContext):
+    """Обработка просмотра призов"""
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "🎁 <b>Текущие призы</b>\n\n"
+        "🏆 <b>Призы за достижения:</b>\n"
+        "• 7 дней подряд - 🥉 Бронзовая медаль\n"
+        "• 14 дней подряд - 🥈 Серебряная медаль\n"
+        "• 30 дней подряд - 🥇 Золотая медаль\n"
+        "• 50 заданий выполнено - 💎 Кристалл мотивации\n\n"
+        "🎯 <b>Призы за ранги:</b>\n"
+        "• Ранг C - 🎖️ Почетная грамота\n"
+        "• Ранг B - 🏅 Специальный значок\n"
+        "• Ранг A - 👑 Корона чемпиона\n"
+        "• Ранг S - 🌟 Звезда легенды\n\n"
+        "Призы начисляются автоматически при достижении целей!\n\n"
+        "<i>Следите за своими достижениями в профиле!</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+        ])
+    )
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "support")
+async def handle_support(callback: CallbackQuery, state: FSMContext):
+    """Обработка поддержки"""
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "💬 <b>Поддержка</b>\n\n"
+        "Если у вас возникли вопросы или проблемы:\n\n"
+        "📧 <b>Email:</b> support@motivationbot.com\n"
+        "💭 <b>Telegram:</b> @motivation_support\n"
+        "🌐 <b>Сайт:</b> motivationbot.com/support\n\n"
+        "🕐 <b>Время работы:</b>\n"
+        "Пн-Пт: 9:00 - 18:00 (MSK)\n"
+        "Сб-Вс: 10:00 - 16:00 (MSK)\n\n"
+        "Мы всегда готовы помочь! 🚀",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+        ])
+    )
+
+@router.callback_query(lambda c: c.data.startswith("complete_task_"))
+async def handle_complete_task(callback: CallbackQuery, state: FSMContext):
+    """Обработка завершения задания"""
+    await callback.answer()
+    task_id = int(callback.data.replace("complete_task_", ""))
+    user_id = callback.from_user.id
+
+    # Отмечаем задание как выполненное
+    success = await db.complete_daily_task(task_id)
+
+    if success:
+        # Получаем текущую статистику пользователя
+        user_stats = await db.get_user_stats(user_id)
+        if user_stats:
+            # Обновляем статистику
+            current_time = int(datetime.datetime.now().timestamp())
+            today = current_time // (24 * 60 * 60)  # День в timestamp
+
+            # Проверяем, выполнялось ли задание сегодня
+            task_completed_today = False
+            if user_stats.last_task_date:
+                last_task_day = user_stats.last_task_date // (24 * 60 * 60)
+                task_completed_today = (today == last_task_day)
+
+            # Обновляем статистику
+            new_experience = user_stats.experience + 10
+            new_total_tasks = user_stats.total_tasks_completed + 1
+
+            # Рассчитываем новый уровень (каждые 100 опыта = новый уровень)
+            new_level = (new_experience // 100) + 1
+
+            # Обновляем стрик
+            new_streak = user_stats.current_streak + 1 if task_completed_today else 1
+            new_best_streak = max(user_stats.best_streak, new_streak)
+
+            # Рассчитываем ранг на основе уровня и стриков
+            new_rank = calculate_rank(new_level, new_best_streak, new_total_tasks)
+
+            # Сохраняем обновленную статистику
+            updated_stats = UserStats(
+                user_id=user_id,
+                level=new_level,
+                experience=new_experience,
+                rank=new_rank,
+                current_streak=new_streak,
+                best_streak=new_best_streak,
+                total_tasks_completed=new_total_tasks,
+                last_task_date=current_time
+            )
+            await db.save_user_stats(updated_stats)
+
+            await callback.message.edit_text(
+                f"🎉 <b>Задание выполнено!</b>\n\n"
+                f"✅ <b>Награда получена:</b>\n"
+                f"⭐ +10 опыта\n"
+                f"📊 Уровень: {new_level} (+{new_level - user_stats.level})\n"
+                f"🏅 Ранг: {new_rank.value}\n"
+                f"🔥 Стрик: {new_streak} дней\n\n"
+                f"Продолжайте в том же духе!",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🎯 Новое задание", callback_data="get_task")],
+                    [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+                    [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+                ])
+            )
+        else:
+            await callback.message.edit_text(
+                "✅ <b>Задание выполнено!</b>\n\n"
+                "Статистика обновлена!",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+                ])
+            )
+    else:
+        await callback.message.edit_text(
+            "❌ <b>Ошибка выполнения задания</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+
+def calculate_rank(level: int, best_streak: int, total_tasks: int) -> Rank:
+    """Рассчитывает ранг пользователя на основе достижений"""
+    score = level * 10 + best_streak * 2 + total_tasks
+
+    if score >= 1000:
+        return Rank.S_PLUS
+    elif score >= 500:
+        return Rank.S
+    elif score >= 300:
+        return Rank.A
+    elif score >= 150:
+        return Rank.B
+    elif score >= 75:
+        return Rank.C
+    elif score >= 30:
+        return Rank.D
+    elif score >= 10:
+        return Rank.E
+    else:
+        return Rank.F
+
+# Обработчики подменю профиля
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "rating")
+async def handle_rating(callback: CallbackQuery, state: FSMContext):
+    """Обработка просмотра рейтинга"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+    user_stats = await db.get_user_stats(user_id)
+
+    if not user or not user_stats:
+        await callback.message.edit_text(
+            "❌ <b>Ошибка загрузки рейтинга</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+            ])
+        )
+        return
+
+    # Получаем топ пользователей по городу
+    city_rating = await db.get_top_users_by_city(user.city, 10)
+
+    # Получаем топ пользователей по рангу
+    rank_rating = await db.get_top_users_by_rank(user_stats.rank.value, 10)
+
+    rating_text = "📊 <b>Рейтинг</b>\n\n"
+
+    # Рейтинг по городу
+    rating_text += f"🏙️ <b>Топ по городу '{user.city}':</b>\n"
+    if city_rating:
+        for i, (name, level, exp, rank) in enumerate(city_rating, 1):
+            rating_text += f"{i}. {name} - Ур.{level} ({rank})\n"
+    else:
+        rating_text += "Пока нет данных\n"
+
+    rating_text += "\n"
+
+    # Рейтинг по рангу
+    rating_text += f"🏅 <b>Топ по рангу '{user_stats.rank.value}':</b>\n"
+    if rank_rating:
+        for i, (name, level, exp, city) in enumerate(rank_rating, 1):
+            rating_text += f"{i}. {name} - Ур.{level} ({city})\n"
+    else:
+        rating_text += "Пока нет данных\n"
+
+    await callback.message.edit_text(
+        rating_text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+        ])
+    )
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "change_photo")
+async def handle_change_photo(callback: CallbackQuery, state: FSMContext):
+    """Обработка замены фотографии"""
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "📸 <b>Замена фотографии</b>\n\n"
+        "Отправьте новое фото для анализа.\n"
+        "Старые характеристики будут сохранены.\n\n"
+        "<i>Только фото будет заменено, статы останутся прежними.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="profile")]
+        ])
+    )
+
+    # Устанавливаем состояние для замены фото
+    await state.set_state(UserRegistration.waiting_for_player_photo)
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "payment_info")
+async def handle_payment_info(callback: CallbackQuery, state: FSMContext):
+    """Обработка информации об оплате"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Получаем данные о подписке
+    user = await db.get_user(user_id)
+
+    if not user or not user.subscription_active or not user.subscription_end:
+        await callback.message.edit_text(
+            "💳 <b>Информация об оплате</b>\n\n"
+            "❌ <b>Подписка не активна</b>\n\n"
+            "Для доступа ко всем функциям оформите подписку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💰 Оформить подписку", callback_data="subscribe")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+            ])
+        )
+        return
+
+    # Рассчитываем оставшееся время
+    current_time = int(datetime.datetime.now().timestamp())
+    time_left = user.subscription_end - current_time
+
+    if time_left <= 0:
+        days_left = 0
+        status = "❌ Истекла"
+    else:
+        days_left = time_left // (24 * 60 * 60)
+        status = f"✅ Активна ({days_left} дней)"
+
+    await callback.message.edit_text(
+        f"💳 <b>Информация об оплате</b>\n\n"
+        f"📅 <b>Статус подписки:</b> {status}\n"
+        f"🎯 <b>Доступ:</b> Все функции активны\n\n"
+        f"Хотите продлить подписку?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💰 Продлить подписку", callback_data="subscribe")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+        ])
+    )
+
+@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "change_goal")
+async def handle_change_goal(callback: CallbackQuery, state: FSMContext):
+    """Обработка смены цели"""
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "🎯 <b>Смена цели</b>\n\n"
+        "Расскажите о вашей новой цели:\n\n"
+        "<i>ИИ поможет сформулировать её правильно.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="profile")]
+        ])
+    )
+
+    # Устанавливаем состояние для ввода новой цели
+    await state.set_state(UserRegistration.waiting_for_goal)
+
+@router.callback_query(lambda c: c.data == "back_to_menu")
+async def handle_back_to_menu(callback: CallbackQuery, state: FSMContext):
+    """Обработка возврата в главное меню"""
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "🎮 <b>Главное меню</b>\n\n"
+        "Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
+            [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
+            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+            [InlineKeyboardButton(text="🎁 Призы", callback_data="prizes")],
+            [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")]
+        ])
+    )
+
+@router.callback_query(lambda c: c.data == "subscribe")
+async def handle_subscribe(callback: CallbackQuery, state: FSMContext):
+    """Обработка оформления подписки"""
+    await callback.answer()
+
+    # Возвращаемся к выбору подписки
+    await callback.message.edit_text(
+        "💰 <b>Выберите план подписки</b>\n\n"
+        "Все планы дают полный доступ ко всем функциям бота:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="1 месяц - 500 ₽", callback_data="sub_1")],
+            [InlineKeyboardButton(text="3 месяца - 1200 ₽", callback_data="sub_3")],
+            [InlineKeyboardButton(text="6 месяцев - 2200 ₽", callback_data="sub_6")],
+            [InlineKeyboardButton(text="12 месяцев - 4000 ₽", callback_data="sub_12")],
+            [InlineKeyboardButton(text="⏭️ Пропустить оплату (тест)", callback_data="skip_payment")],
+            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+        ])
+    )
+
+async def generate_daily_task(user_goal: str) -> str:
+    """Генерирует ежедневное задание на основе цели пользователя"""
+    try:
+        import ssl
+        import certifi
+
+        # Создаем SSL-контекст с сертификатами certifi
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+        task_prompt = f"""
+        Создай конкретное, выполнимое ежедневное задание для человека, цель которого: "{user_goal}"
+
+        Требования к заданию:
+        1. Задание должно быть конкретным и измеримым
+        2. Выполнимым в течение одного дня
+        3. Связанным с основной целью пользователя
+        4. Мотивирующим и позитивным
+        5. Не слишком сложным, но требующим усилий
+
+        Примеры хороших заданий:
+        - "Прочитать 10 страниц книги по программированию"
+        - "Сделать 20 минут кардио тренировки"
+        - "Написать 500 слов для статьи"
+        - "Выучить 5 новых английских слов"
+
+        Верни ТОЛЬКО текст задания, без дополнительных комментариев.
+        """
+
+        async with aiohttp.ClientSession(connector=connector) as session:
+            payload = {
+                "model": DEFAULT_MODEL,
+                "messages": [
+                    {"role": "system", "content": task_prompt},
+                    {"role": "user", "content": f"Создай задание для цели: {user_goal}"}
+                ],
+                "max_tokens": 300,
+                "temperature": 0.8
+            }
+
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://t.me/motivation_bot",
+                "X-Title": "Motivation Bot"
+            }
+
+            async with session.post(
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                json=payload,
+                headers=headers
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    task = data["choices"][0]["message"]["content"].strip()
+                    return task
+                else:
+                    logger.error(f"OpenRouter API error: {response.status}")
+                    return f"Поработать над целью: {user_goal[:50]}..."
+
+    except Exception as e:
+        logger.error(f"Error generating daily task: {e}")
+        return f"Сделать шаг к цели: {user_goal[:50]}..."
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):

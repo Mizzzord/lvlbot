@@ -89,3 +89,34 @@ class PlayerStats:
     card_image_path: Optional[str] = None  # путь к изображению карточки
     created_at: int = 0  # timestamp создания
     updated_at: int = 0  # timestamp обновления
+
+class Rank(Enum):
+    F = "F"
+    E = "E"
+    D = "D"
+    C = "C"
+    B = "B"
+    A = "A"
+    S = "S"
+    S_PLUS = "S+"
+
+@dataclass
+class DailyTask:
+    id: Optional[int] = None
+    user_id: int = 0
+    task_description: str = ""
+    created_at: int = 0  # timestamp создания
+    expires_at: int = 0   # timestamp окончания (24 часа)
+    completed: bool = False
+    completed_at: Optional[int] = None  # timestamp выполнения
+
+@dataclass
+class UserStats:
+    user_id: int = 0
+    level: int = 1
+    experience: int = 0
+    rank: Rank = Rank.F
+    current_streak: int = 0  # дней подряд выполнения целей
+    best_streak: int = 0     # лучший стрик
+    total_tasks_completed: int = 0
+    last_task_date: Optional[int] = None  # timestamp последнего выполненного задания
