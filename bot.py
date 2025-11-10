@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import aiohttp
+import datetime
 from datetime import date
 from typing import Optional
 
@@ -14,8 +15,10 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKey
 
 from config import BOT_TOKEN
 from database import Database
-from models import User
+from models import User, Payment, PaymentStatus
 from openrouter_config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
+from subscription_config import SUBSCRIPTION_PLANS
+from wata_api import wata_create_payment, wata_check_payment
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +35,8 @@ class UserRegistration(StatesGroup):
     waiting_for_referral = State()
     waiting_for_goal = State()
     waiting_for_goal_confirmation = State()
+    waiting_for_subscription = State()
+    waiting_for_payment = State()
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -161,6 +166,18 @@ def create_goal_confirmation_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+def create_subscription_keyboard() -> InlineKeyboardMarkup:
+    """Создание inline клавиатуры для выбора подписки"""
+    keyboard = []
+    for months, plan in SUBSCRIPTION_PLANS.items():
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{plan['description']} - {plan['price']} ₽",
+                callback_data=f"sub_{months}"
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def validate_date(date_str: str) -> Optional[date]:
     """Валидация даты рождения в формате ДД.ММ.ГГГГ"""
@@ -567,7 +584,7 @@ async def finalize_registration(message: Message, state: FSMContext):
     referral_text = f"📢 Реферальный код: {referral_code}\n" if referral_code else ""
 
     await message.edit_text(
-        f"🎉 Регистрация завершена! Добро пожаловать в команду изменений!\n\n"
+        f"🎉 Отлично! Регистрация завершена!\n\n"
         f"🌐 Язык: {get_language_emoji(language)}\n"
         f"👤 Имя: {name}\n"
         f"📅 Дата рождения: {data.get('birth_date').strftime('%d.%m.%Y') if data.get('birth_date') else 'Не указана'}\n"
@@ -576,10 +593,117 @@ async def finalize_registration(message: Message, state: FSMContext):
         f"🏙️ Город: {data.get('city')}\n"
         f"{referral_text}"
         f"🎯 Цель: {data.get('goal')}\n\n"
-        f"🚀 Теперь я буду помогать тебе достигать своей цели! "
-        f"Каждый день я буду предлагать персональные задания. Используй /help для получения дополнительной информации.",
-        reply_markup=None
+        f"💳 Теперь выберите период подписки для доступа к персональным заданиям:",
+        reply_markup=create_subscription_keyboard()
     )
+
+    # Переходим к выбору подписки
+    await state.set_state(UserRegistration.waiting_for_subscription)
+
+@router.callback_query(UserRegistration.waiting_for_subscription)
+async def process_subscription_choice(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора периода подписки"""
+    await callback.answer()
+
+    # Получаем выбранный период из callback_data (sub_1, sub_3, etc.)
+    months = int(callback.data.replace("sub_", ""))
+
+    if months not in SUBSCRIPTION_PLANS:
+        await callback.answer("Неверный выбор периода подписки", show_alert=True)
+        return
+
+    plan = SUBSCRIPTION_PLANS[months]
+    user_id = callback.from_user.id
+
+    # Создаем timestamp
+    now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+    # Получаем информацию о боте
+    bot_info = await bot.get_me()
+    bot_name = bot_info.username or "MotivationBot"
+
+    # Создаем платеж через WATA API
+    result = await wata_create_payment(
+        user_mid=user_id,
+        money=plan['price'],
+        months=months,
+        bot_name=bot_name,
+        created_at=now
+    )
+
+    if result:
+        payment_id, payment_link = result
+
+        # Сохраняем информацию о платеже в БД
+        payment = Payment(
+            user_id=user_id,
+            payment_id=payment_id,
+            order_id=f"{user_id}{now}",
+            amount=plan['price'],
+            months=months,
+            status=PaymentStatus.PENDING,
+            created_at=now
+        )
+
+        payment_db_id = await db.save_payment(payment)
+
+        # Отправляем пользователю ссылку на оплату
+        await callback.message.edit_text(
+            f"💳 Подписка на {plan['description']}\n"
+            f"💰 Стоимость: {plan['price']} ₽\n\n"
+            f"Ссылка для оплаты: {payment_link}\n\n"
+            f"⏰ Ссылка действительна 1 час",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Оплатить", url=payment_link)],
+                [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_payment_{payment_db_id}")]
+            ])
+        )
+
+        # Переходим к состоянию ожидания оплаты
+        await state.set_state(UserRegistration.waiting_for_payment)
+        await state.update_data(current_payment_id=payment_db_id)
+
+    else:
+        await callback.message.edit_text(
+            "❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.",
+            reply_markup=None
+        )
+
+@router.callback_query(lambda c: c.data.startswith("check_payment_"))
+async def check_payment_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработка проверки оплаты"""
+    await callback.answer()
+
+    payment_db_id = int(callback.data.replace("check_payment_", ""))
+
+    # Получаем платеж из БД
+    # Для простоты будем использовать прямой запрос, но в реальном коде лучше добавить метод в database.py
+    async with aiosqlite.connect("bot_database.db") as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM payments WHERE id = ?", (payment_db_id,))
+        row = await cursor.fetchone()
+
+        if row:
+            # Проверяем статус оплаты через WATA API
+            is_paid = await wata_check_payment(row['user_id'], row['created_at'])
+
+            if is_paid:
+                # Обновляем статус платежа в БД
+                await db.update_payment_status(payment_db_id, "paid", int(datetime.datetime.now().timestamp()))
+
+                await callback.message.edit_text(
+                    f"✅ Оплата подтверждена!\n\n"
+                    f"🎉 Подписка на {row['months']} месяцев активирована!\n\n"
+                    f"🚀 Теперь вы можете пользоваться всеми функциями бота!",
+                    reply_markup=None
+                )
+
+                # Очищаем состояние
+                await state.clear()
+            else:
+                await callback.answer("⏳ Оплата не найдена. Попробуйте позже.", show_alert=True)
+        else:
+            await callback.answer("❌ Платеж не найден", show_alert=True)
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
@@ -621,9 +745,46 @@ async def handle_unknown(message: Message, state: FSMContext):
             "Неизвестная команда. Используйте /start для начала регистрации или /help для справки."
         )
 
+async def payment_polling_task():
+    """Фоновая задача для периодической проверки неоплаченных платежей"""
+    while True:
+        try:
+            # Получаем все неоплаченные платежи из БД
+            pending_payments = await db.get_pending_payments()
+
+            for payment in pending_payments:
+                # Проверяем статус оплаты через WATA API
+                is_paid = await wata_check_payment(payment.user_id, payment.created_at)
+
+                if is_paid:
+                    # Обновляем статус платежа в БД
+                    await db.update_payment_status(payment.id, "paid", int(datetime.datetime.now().timestamp()))
+
+                    # Уведомляем пользователя об успешной оплате
+                    try:
+                        await bot.send_message(
+                            payment.user_id,
+                            f"✅ Оплата получена!\n\n"
+                            f"🎉 Подписка на {payment.months} месяцев активирована!\n\n"
+                            f"🚀 Теперь вы можете пользоваться всеми функциями бота!"
+                        )
+                    except Exception as e:
+                        logger.error(f"Не удалось отправить уведомление пользователю {payment.user_id}: {e}")
+
+                    logger.info(f"Платеж {payment.id} для пользователя {payment.user_id} подтвержден")
+
+            # Проверяем каждые 30 секунд
+            await asyncio.sleep(30)
+
+        except Exception as e:
+            logger.error(f"[payment_polling_task] Error: {e}")
+            await asyncio.sleep(60)
+
 async def on_startup():
     """Функция, выполняемая при запуске бота"""
     await db.init_db()
+    # Запускаем фоновую задачу проверки платежей
+    asyncio.create_task(payment_polling_task())
     logger.info("Бот запущен и готов к работе")
 
 async def on_shutdown():

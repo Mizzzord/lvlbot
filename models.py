@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 from datetime import date
+from enum import Enum
 
 @dataclass
 class User:
@@ -25,3 +26,21 @@ class User:
             self.weight is not None,
             self.city is not None
         ])
+
+class PaymentStatus(Enum):
+    PENDING = "pending"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+@dataclass
+class Payment:
+    id: Optional[int] = None
+    user_id: int = 0
+    payment_id: str = ""  # ID платежа от WATA
+    order_id: str = ""  # Уникальный orderId для поиска
+    amount: float = 0.0
+    months: int = 0
+    status: PaymentStatus = PaymentStatus.PENDING
+    created_at: int = 0  # timestamp
+    paid_at: Optional[int] = None  # timestamp оплаты

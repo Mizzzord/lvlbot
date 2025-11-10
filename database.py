@@ -2,7 +2,7 @@ import aiosqlite
 import logging
 from datetime import date
 from typing import Optional
-from models import User
+from models import User, Payment, PaymentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,21 @@ class Database:
                     goal TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    payment_id TEXT,
+                    order_id TEXT UNIQUE,
+                    amount REAL,
+                    months INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    created_at INTEGER,
+                    paid_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id)
                 )
             ''')
 
@@ -162,3 +177,83 @@ class Database:
                     goal=row['goal']
                 ))
             return users
+
+    async def save_payment(self, payment: Payment) -> int:
+        """Сохранение платежа в базу данных"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO payments (user_id, payment_id, order_id, amount, months, status, created_at, paid_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                payment.user_id,
+                payment.payment_id,
+                payment.order_id,
+                payment.amount,
+                payment.months,
+                payment.status.value,
+                payment.created_at,
+                payment.paid_at
+            ))
+            payment_id = cursor.lastrowid
+            await db.commit()
+            logger.info(f"Платеж {payment.order_id} сохранен")
+            return payment_id
+
+    async def get_payment_by_order_id(self, order_id: str) -> Optional[Payment]:
+        """Получение платежа по order_id"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM payments WHERE order_id = ?",
+                (order_id,)
+            )
+            row = await cursor.fetchone()
+
+        if row:
+            return Payment(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    payment_id=row['payment_id'],
+                    order_id=row['order_id'],
+                    amount=row['amount'],
+                    months=row['months'],
+                    status=PaymentStatus(row['status']),
+                    created_at=row['created_at'],
+                    paid_at=row['paid_at']
+                )
+            return None
+
+    async def get_pending_payments(self) -> list[Payment]:
+        """Получение всех неоплаченных платежей"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM payments WHERE status = 'pending' ORDER BY created_at DESC"
+            )
+            rows = await cursor.fetchall()
+
+            payments = []
+            for row in rows:
+                payments.append(Payment(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    payment_id=row['payment_id'],
+                    order_id=row['order_id'],
+                    amount=row['amount'],
+                    months=row['months'],
+                    status=PaymentStatus(row['status']),
+                    created_at=row['created_at'],
+                    paid_at=row['paid_at']
+                ))
+            return payments
+
+    async def update_payment_status(self, payment_id: int, status: str, paid_at: Optional[int] = None):
+        """Обновление статуса платежа"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE payments
+                SET status = ?, paid_at = ?
+                WHERE id = ?
+            ''', (status, paid_at, payment_id))
+            await db.commit()
+            logger.info(f"Статус платежа {payment_id} обновлен на {status}")
