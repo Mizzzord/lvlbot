@@ -1,8 +1,9 @@
 import aiosqlite
+import datetime
 import logging
 from datetime import date
 from typing import Optional
-from models import User, Payment, PaymentStatus
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,7 @@ class Database:
     async def init_db(self):
         """Инициализация базы данных и создание таблиц"""
         async with aiosqlite.connect(self.db_path) as db:
+            # Создаем таблицу пользователей
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id INTEGER PRIMARY KEY,
@@ -24,11 +26,16 @@ class Database:
                     city TEXT,
                     referral_code TEXT,
                     goal TEXT,
+                    subscription_active BOOLEAN DEFAULT FALSE,
+                    subscription_start INTEGER,
+                    subscription_end INTEGER,
+                    referral_count INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
+            # Создаем таблицу платежей с расширенными полями
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS payments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,34 +47,82 @@ class Database:
                     status TEXT DEFAULT 'pending',
                     created_at INTEGER,
                     paid_at INTEGER,
+                    currency TEXT DEFAULT 'RUB',
+                    payment_method TEXT DEFAULT 'WATA',
+                    discount_code TEXT,
+                    referral_used TEXT,
+                    subscription_type TEXT DEFAULT 'standard',
                     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
                 )
             ''')
 
-            # Добавляем недостающие колонки (для существующих баз данных)
-            try:
-                await db.execute('ALTER TABLE users ADD COLUMN language TEXT')
-                logger.info("Колонка language добавлена в таблицу")
-            except aiosqlite.OperationalError:
-                # Колонка уже существует
-                pass
+            # Создаем таблицу подписок
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    payment_id INTEGER,
+                    start_date INTEGER,
+                    end_date INTEGER,
+                    months INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    auto_renew BOOLEAN DEFAULT FALSE,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id),
+                    FOREIGN KEY (payment_id) REFERENCES payments (id)
+                )
+            ''')
 
-            try:
-                await db.execute('ALTER TABLE users ADD COLUMN referral_code TEXT')
-                logger.info("Колонка referral_code добавлена в таблицу")
-            except aiosqlite.OperationalError:
-                # Колонка уже существует
-                pass
+            # Создаем индексы для производительности
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)')
 
-            try:
-                await db.execute('ALTER TABLE users ADD COLUMN goal TEXT')
-                logger.info("Колонка goal добавлена в таблицу")
-            except aiosqlite.OperationalError:
-                # Колонка уже существует
-                pass
+            # Добавляем недостающие колонки для существующих баз данных
+            await self._add_missing_columns(db)
 
             await db.commit()
             logger.info("База данных инициализирована")
+
+    async def _add_missing_columns(self, db):
+        """Добавляет недостающие колонки для совместимости с существующими базами данных"""
+        # Поля для таблицы users
+        user_columns = [
+            ('language', 'TEXT'),
+            ('referral_code', 'TEXT'),
+            ('goal', 'TEXT'),
+            ('subscription_active', 'BOOLEAN DEFAULT FALSE'),
+            ('subscription_start', 'INTEGER'),
+            ('subscription_end', 'INTEGER'),
+            ('referral_count', 'INTEGER DEFAULT 0')
+        ]
+
+        for column_name, column_type in user_columns:
+            try:
+                await db.execute(f'ALTER TABLE users ADD COLUMN {column_name} {column_type}')
+                logger.info(f"Колонка {column_name} добавлена в таблицу users")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+        # Поля для таблицы payments
+        payment_columns = [
+            ('currency', "TEXT DEFAULT 'RUB'"),
+            ('payment_method', "TEXT DEFAULT 'WATA'"),
+            ('discount_code', 'TEXT'),
+            ('referral_used', 'TEXT'),
+            ('subscription_type', "TEXT DEFAULT 'standard'")
+        ]
+
+        for column_name, column_type in payment_columns:
+            try:
+                await db.execute(f'ALTER TABLE payments ADD COLUMN {column_name} {column_type}')
+                logger.info(f"Колонка {column_name} добавлена в таблицу payments")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
 
     async def get_user(self, telegram_id: int) -> Optional[User]:
         """Получение пользователя по telegram_id"""
@@ -97,7 +152,11 @@ class Database:
                     weight=row['weight'],
                     city=row['city'],
                     referral_code=row['referral_code'],
-                    goal=row['goal']
+                    goal=row['goal'],
+                    subscription_active=bool(row['subscription_active']),
+                    subscription_start=row['subscription_start'],
+                    subscription_end=row['subscription_end'],
+                    referral_count=row['referral_count']
                 )
             return None
 
@@ -108,8 +167,9 @@ class Database:
             birth_date_str = user.birth_date.isoformat() if user.birth_date else None
 
             await db.execute('''
-                INSERT INTO users (telegram_id, language, name, birth_date, height, weight, city, referral_code, goal, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO users (telegram_id, language, name, birth_date, height, weight, city, referral_code, goal,
+                                  subscription_active, subscription_start, subscription_end, referral_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(telegram_id) DO UPDATE SET
                     language = excluded.language,
                     name = excluded.name,
@@ -119,6 +179,10 @@ class Database:
                     city = excluded.city,
                     referral_code = excluded.referral_code,
                     goal = excluded.goal,
+                    subscription_active = excluded.subscription_active,
+                    subscription_start = excluded.subscription_start,
+                    subscription_end = excluded.subscription_end,
+                    referral_count = excluded.referral_count,
                     updated_at = CURRENT_TIMESTAMP
             ''', (
                 user.telegram_id,
@@ -129,7 +193,11 @@ class Database:
                 user.weight,
                 user.city,
                 user.referral_code,
-                user.goal
+                user.goal,
+                user.subscription_active,
+                user.subscription_start,
+                user.subscription_end,
+                user.referral_count
             ))
             await db.commit()
             logger.info(f"Пользователь {user.telegram_id} сохранен")
@@ -174,7 +242,11 @@ class Database:
                     weight=row['weight'],
                     city=row['city'],
                     referral_code=row['referral_code'],
-                    goal=row['goal']
+                    goal=row['goal'],
+                    subscription_active=bool(row['subscription_active']),
+                    subscription_start=row['subscription_start'],
+                    subscription_end=row['subscription_end'],
+                    referral_count=row['referral_count']
                 ))
             return users
 
@@ -182,8 +254,9 @@ class Database:
         """Сохранение платежа в базу данных"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
-                INSERT INTO payments (user_id, payment_id, order_id, amount, months, status, created_at, paid_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO payments (user_id, payment_id, order_id, amount, months, status, created_at, paid_at,
+                                     currency, payment_method, discount_code, referral_used, subscription_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 payment.user_id,
                 payment.payment_id,
@@ -192,7 +265,12 @@ class Database:
                 payment.months,
                 payment.status.value,
                 payment.created_at,
-                payment.paid_at
+                payment.paid_at,
+                payment.currency,
+                payment.payment_method,
+                payment.discount_code,
+                payment.referral_used,
+                payment.subscription_type
             ))
             payment_id = cursor.lastrowid
             await db.commit()
@@ -219,7 +297,12 @@ class Database:
                     months=row['months'],
                     status=PaymentStatus(row['status']),
                     created_at=row['created_at'],
-                    paid_at=row['paid_at']
+                    paid_at=row['paid_at'],
+                    currency=row['currency'],
+                    payment_method=row['payment_method'],
+                    discount_code=row['discount_code'],
+                    referral_used=row['referral_used'],
+                    subscription_type=row['subscription_type']
                 )
             return None
 
@@ -243,7 +326,12 @@ class Database:
                     months=row['months'],
                     status=PaymentStatus(row['status']),
                     created_at=row['created_at'],
-                    paid_at=row['paid_at']
+                    paid_at=row['paid_at'],
+                    currency=row['currency'],
+                    payment_method=row['payment_method'],
+                    discount_code=row['discount_code'],
+                    referral_used=row['referral_used'],
+                    subscription_type=row['subscription_type']
                 ))
             return payments
 
@@ -257,3 +345,118 @@ class Database:
             ''', (status, paid_at, payment_id))
             await db.commit()
             logger.info(f"Статус платежа {payment_id} обновлен на {status}")
+
+    # Методы для работы с подписками
+
+    async def save_subscription(self, subscription: Subscription) -> int:
+        """Сохранение подписки в базу данных"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
+                                          auto_renew, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                subscription.user_id,
+                subscription.payment_id,
+                subscription.start_date,
+                subscription.end_date,
+                subscription.months,
+                subscription.status.value,
+                subscription.auto_renew,
+                subscription.created_at,
+                subscription.updated_at
+            ))
+            subscription_id = cursor.lastrowid
+            await db.commit()
+            logger.info(f"Подписка {subscription_id} для пользователя {subscription.user_id} сохранена")
+            return subscription_id
+
+    async def get_active_subscription(self, user_id: int) -> Optional[Subscription]:
+        """Получение активной подписки пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM subscriptions
+                WHERE user_id = ? AND status = 'active' AND end_date > ?
+                ORDER BY end_date DESC
+                LIMIT 1
+            ''', (user_id, int(datetime.datetime.now().timestamp())))
+
+            row = await cursor.fetchone()
+            if row:
+                return Subscription(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    payment_id=row['payment_id'],
+                    start_date=row['start_date'],
+                    end_date=row['end_date'],
+                    months=row['months'],
+                    status=SubscriptionStatus(row['status']),
+                    auto_renew=bool(row['auto_renew']),
+                    created_at=row['created_at'],
+                    updated_at=row['updated_at']
+                )
+            return None
+
+    async def get_user_subscriptions(self, user_id: int) -> list[Subscription]:
+        """Получение всех подписок пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM subscriptions
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            ''', (user_id,))
+
+            rows = await cursor.fetchall()
+            subscriptions = []
+
+            for row in rows:
+                subscriptions.append(Subscription(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    payment_id=row['payment_id'],
+                    start_date=row['start_date'],
+                    end_date=row['end_date'],
+                    months=row['months'],
+                    status=SubscriptionStatus(row['status']),
+                    auto_renew=bool(row['auto_renew']),
+                    created_at=row['created_at'],
+                    updated_at=row['updated_at']
+                ))
+
+            return subscriptions
+
+    async def update_subscription_status(self, subscription_id: int, status: str):
+        """Обновление статуса подписки"""
+        async with aiosqlite.connect(self.db_path) as db:
+            current_time = int(datetime.datetime.now().timestamp())
+            await db.execute('''
+                UPDATE subscriptions
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+            ''', (status, current_time, subscription_id))
+            await db.commit()
+            logger.info(f"Статус подписки {subscription_id} обновлен на {status}")
+
+    async def activate_user_subscription(self, user_id: int, subscription_start: int, subscription_end: int):
+        """Активация подписки пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE users
+                SET subscription_active = TRUE, subscription_start = ?, subscription_end = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE telegram_id = ?
+            ''', (subscription_start, subscription_end, user_id))
+            await db.commit()
+            logger.info(f"Подписка пользователя {user_id} активирована")
+
+    async def deactivate_user_subscription(self, user_id: int):
+        """Деактивация подписки пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE users
+                SET subscription_active = FALSE, subscription_start = NULL, subscription_end = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE telegram_id = ?
+            ''', (user_id,))
+            await db.commit()
+            logger.info(f"Подписка пользователя {user_id} деактивирована")

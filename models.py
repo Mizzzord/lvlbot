@@ -14,6 +14,10 @@ class User:
     city: Optional[str] = None
     referral_code: Optional[str] = None
     goal: Optional[str] = None
+    subscription_active: bool = False
+    subscription_start: Optional[int] = None  # timestamp
+    subscription_end: Optional[int] = None  # timestamp
+    referral_count: int = 0  # количество приглашенных пользователей
 
     @property
     def is_complete(self) -> bool:
@@ -32,6 +36,13 @@ class PaymentStatus(Enum):
     PAID = "paid"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
+    FAILED = "failed"
+
+class SubscriptionStatus(Enum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+    PENDING = "pending"
 
 @dataclass
 class Payment:
@@ -44,3 +55,21 @@ class Payment:
     status: PaymentStatus = PaymentStatus.PENDING
     created_at: int = 0  # timestamp
     paid_at: Optional[int] = None  # timestamp оплаты
+    currency: str = "RUB"
+    payment_method: str = "WATA"
+    discount_code: Optional[str] = None
+    referral_used: Optional[str] = None
+    subscription_type: str = "standard"  # standard, premium, etc.
+
+@dataclass
+class Subscription:
+    id: Optional[int] = None
+    user_id: int = 0
+    payment_id: Optional[int] = None  # ссылка на платеж
+    start_date: int = 0  # timestamp начала
+    end_date: int = 0  # timestamp окончания
+    months: int = 0
+    status: SubscriptionStatus = SubscriptionStatus.PENDING
+    auto_renew: bool = False
+    created_at: int = 0  # timestamp создания
+    updated_at: int = 0  # timestamp обновления

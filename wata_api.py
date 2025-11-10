@@ -1,7 +1,10 @@
 import aiohttp
+import asyncio
 import json
 import datetime
 import logging
+import ssl
+import certifi
 from typing import Optional, Tuple
 
 from subscription_config import WATA_TOKEN, WATA_NEW_PAYMENT_LINK, WATA_PAYMENT_LINK
@@ -28,7 +31,11 @@ async def wata_create_payment(
     Returns:
         tuple: (payment_id, payment_link) или None в случае ошибки
     """
-    async with aiohttp.ClientSession() as session:
+    # Создаем SSL-контекст с сертификатами certifi
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+    async with aiohttp.ClientSession(connector=connector) as session:
         # Формируем уникальный orderId
         order_id = f"{user_mid}{created_at}"
 
@@ -95,7 +102,11 @@ async def wata_check_payment(payment_mid: int, created_at: int) -> bool:
     Returns:
         bool: True если платеж оплачен, False в остальных случаях
     """
-    async with aiohttp.ClientSession() as session:
+    # Создаем SSL-контекст с сертификатами certifi
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+    async with aiohttp.ClientSession(connector=connector) as session:
         # Формируем тот же orderId, что и при создании
         order_id = f"{payment_mid}{created_at}"
         check_payment_link = WATA_PAYMENT_LINK.format(order_id)

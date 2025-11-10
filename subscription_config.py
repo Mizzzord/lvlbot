@@ -31,5 +31,5 @@ load_dotenv()
 WATA_TOKEN = os.getenv("WATA_TOKEN") or "your_wata_bearer_token_here"
 #WATA_NEW_PAYMENT_LINK = "https://api.wata.pro/api/h2h/links"
 WATA_NEW_PAYMENT_LINK = "https://api-sandbox.wata.pro/api/h2h/links"
-#WATA_PAYMENT_LINK = "https://api.wata.pro/api/h2h/transactions/?orderId={}"
-WATA_PAYMENT_LINK = "https://api-sandbox.wata.pro/api/h2h/transactions/?orderId={}"
+WATA_PAYMENT_LINK = "https://api.wata.pro/api/h2h/transactions/?orderId={}"
+#WATA_PAYMENT_LINK = "https://api-sandbox.wata.pro/api/h2h/transactions/?orderId={}"
