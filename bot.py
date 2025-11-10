@@ -15,12 +15,15 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 
 from config import BOT_TOKEN
 from database import Database
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats
-from openrouter_config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
+from openrouter_config import (
+    OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT,
+    PHOTO_ANALYSIS_PROMPT, TASK_GENERATION_TEMPLATE
+)
 from subscription_config import SUBSCRIPTION_PLANS
 from wata_api import wata_create_payment, wata_check_payment
 
@@ -43,6 +46,7 @@ class UserRegistration(StatesGroup):
     waiting_for_payment = State()
     waiting_for_player_photo = State()
     main_menu = State()
+    changing_goal = State()
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -58,6 +62,20 @@ def create_cancel_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text="Отмена")]],
         resize_keyboard=True,
         one_time_keyboard=True
+    )
+
+def create_main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Создание клавиатуры главного меню"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎯 Получить задание")],
+            [KeyboardButton(text="📋 Активные задания")],
+            [KeyboardButton(text="👤 Профиль")],
+            [KeyboardButton(text="🎁 Призы")],
+            [KeyboardButton(text="💬 Поддержка")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
 
 def create_language_keyboard() -> ReplyKeyboardMarkup:
@@ -233,13 +251,7 @@ async def skip_payment_process(callback: CallbackQuery, state: FSMContext):
 
 async def show_main_menu(message: Message):
     """Показать главное меню пользователя"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
-        [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🎁 Призы", callback_data="prizes")],
-        [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")]
-    ])
+    keyboard = create_main_menu_keyboard()
 
     await message.answer(
         "🎮 <b>Главное меню</b>\n\n"
@@ -270,20 +282,7 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
         # Конвертируем изображение в base64
         image_base64 = base64.b64encode(photo_bytes).decode('utf-8')
 
-        analysis_prompt = """
-        Ты - эксперт по оценке физических способностей человека. Проанализируй изображение человека и оцени его физические характеристики по шкале от 1 до 100:
-
-        Оцени следующие параметры:
-        - СИЛА: Оцени физическую силу, мышечную массу, телосложение. Учитывай размер мышц, осанку, общую мощность тела.
-        - ЛОВКОСТЬ: Оцени координацию, гибкость, подвижность. Учитывай пропорции тела, гибкость, баланс.
-        - ВЫНОСЛИВОСТЬ: Оцени общее состояние здоровья, энергичность, выносливость. Учитывай цвет кожи, осанку, общий вид.
-
-        Требования:
-        1. Верни ТОЛЬКО JSON объект в формате: {"strength": число, "agility": число, "endurance": число}
-        2. Числа должны быть от 1 до 100
-        3. Будь объективен и реалистичен в оценках
-        4. Учитывай возраст, пол, телосложение человека на фото
-        """
+        analysis_prompt = PHOTO_ANALYSIS_PROMPT
 
         async with aiohttp.ClientSession(connector=connector) as session:
             payload = {
@@ -623,6 +622,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 f"Готов продолжить приключения?",
                 parse_mode="HTML"
             )
+            await state.set_state(UserRegistration.main_menu)
             await show_main_menu(message)
         else:
             # У пользователя нет карточки - показываем обычное приветствие
@@ -921,12 +921,15 @@ async def process_referral(message: Message, state: FSMContext):
 async def process_goal(message: Message, state: FSMContext):
     """Обработка цели пользователя"""
     goal = message.text.strip()
+    user_id = message.from_user.id
 
     if len(goal) < 3:
         await message.answer(
             "Пожалуйста, опишите вашу цель более подробно (минимум 3 символа):"
         )
         return
+
+    logger.info(f"Пользователь {user_id} ввел цель: '{goal}'")
 
     # Сохраняем цель во временном состоянии
     await state.update_data(goal=goal)
@@ -944,13 +947,17 @@ async def process_goal_confirmation(callback: CallbackQuery, state: FSMContext):
     await callback.answer()  # Убираем часики загрузки
 
     action = callback.data
+    user_id = callback.from_user.id
+    logger.info(f"process_goal_confirmation: callback.from_user.id = {user_id}, action = {action}")
 
     if action == "goal_confirm":
         # Пользователь подтвердил цель - завершаем регистрацию
-        await finalize_registration(callback.message, state)
+        logger.info(f"Пользователь {user_id} подтвердил цель, завершаем регистрацию")
+        await finalize_registration(callback.message, state, user_id)
 
     elif action == "goal_improve":
         # Улучшаем цель с помощью ИИ
+        logger.info(f"Пользователь {user_id} выбрал улучшение цели ИИ")
         data = await state.get_data()
         original_goal = data.get('goal', '')
 
@@ -963,6 +970,7 @@ async def process_goal_confirmation(callback: CallbackQuery, state: FSMContext):
 
         # Вызываем OpenRouter API
         improved_goal = await improve_goal_with_ai(original_goal)
+        logger.info(f"Цель улучшена ИИ для пользователя {user_id}: '{original_goal}' -> '{improved_goal}'")
 
         # Сохраняем улучшенную цель
         await state.update_data(goal=improved_goal)
@@ -976,6 +984,7 @@ async def process_goal_confirmation(callback: CallbackQuery, state: FSMContext):
 
     elif action == "goal_edit":
         # Возвращаемся к вводу цели
+        logger.info(f"Пользователь {user_id} выбрал редактирование цели")
         await state.set_state(UserRegistration.waiting_for_goal)
         await callback.message.edit_text(
             "🎯 Хорошо, давайте переформулируем цель.\n\n"
@@ -983,16 +992,48 @@ async def process_goal_confirmation(callback: CallbackQuery, state: FSMContext):
             reply_markup=None
         )
 
-async def finalize_registration(message: Message, state: FSMContext):
+async def finalize_registration(message: Message, state: FSMContext, user_id: int = None):
     """Завершение регистрации пользователя"""
     data = await state.get_data()
+    telegram_id = user_id if user_id else message.from_user.id
+    logger.info(f"Завершение регистрации пользователя {telegram_id}. Данные состояния: {data}")
 
     # Сохраняем данные в базу
-    telegram_id = message.from_user.id
     user = await db.get_user(telegram_id)
     if user:
-        user.goal = data.get('goal')
+        goal = data.get('goal')
+        logger.info(f"Извлечена цель из состояния: '{goal}'")
+        if goal and len(goal.strip()) > 0:
+            user.goal = goal.strip()
+            logger.info(f"Сохраняем цель пользователя {telegram_id}: '{user.goal}'")
+            await db.save_user(user)
+
+            # Проверяем, что цель действительно сохранилась
+            saved_user = await db.get_user(telegram_id)
+            if saved_user and saved_user.goal:
+                logger.info(f"Цель успешно сохранена в БД: '{saved_user.goal}'")
+            else:
+                logger.error(f"Ошибка: цель не сохранилась в БД для пользователя {telegram_id}")
+        else:
+            logger.warning(f"Цель пользователя {telegram_id} пустая или не установлена: '{goal}'")
+    else:
+        logger.error(f"Пользователь {telegram_id} не найден при завершении регистрации")
+        # Попробуем создать пользователя, если он не существует
+        logger.info(f"Пытаемся создать пользователя {telegram_id}")
+        user = User(telegram_id=telegram_id)
+        goal = data.get('goal')
+        if goal and len(goal.strip()) > 0:
+            user.goal = goal.strip()
+        # Заполняем остальные поля из состояния
+        user.language = data.get('language')
+        user.name = data.get('name')
+        user.birth_date = data.get('birth_date')
+        user.height = data.get('height')
+        user.weight = data.get('weight')
+        user.city = data.get('city')
+        user.referral_code = data.get('referral_code')
         await db.save_user(user)
+        logger.info(f"Пользователь {telegram_id} создан при завершении регистрации")
 
     # Получаем все данные для финального сообщения
     name = data.get('name', 'Пользователь')
@@ -1275,16 +1316,20 @@ async def process_player_photo(message: Message, state: FSMContext):
         await db.save_user_stats(user_statistics)
 
         # Отправляем изображение карточки
-        try:
-            with open(card_image_path, 'rb') as card_file:
+        if card_image_path and os.path.exists(card_image_path):
+            try:
+                photo = FSInputFile(card_image_path)
                 await message.answer_photo(
-                    card_file,
+                    photo,
                     caption="🎮 <b>Ваша игровая карточка создана!</b>",
                     parse_mode="HTML"
                 )
-        except Exception as e:
-            logger.warning(f"Не удалось отправить изображение карточки: {e}")
-            await message.answer("⚠️ Карточка создана, но изображение не удалось отправить.")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить изображение карточки: {e}")
+                await message.answer("⚠️ Карточка создана, но изображение не удалось отправить.")
+        else:
+            logger.warning(f"Карточка не была создана: card_image_path={card_image_path}")
+            await message.answer("⚠️ Произошла ошибка при создании карточки.")
 
         # Показываем характеристики
         await message.answer(
@@ -1324,39 +1369,62 @@ async def process_player_photo_invalid(message: Message):
 
 # Обработчики главного меню
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "get_task")
-async def handle_get_task(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "🎯 Получить задание")
+async def handle_get_task(message: Message, state: FSMContext):
     """Обработка получения задания"""
-    await callback.answer()
-    user_id = callback.from_user.id
+    user_id = message.from_user.id
+    logger.info(f"Пользователь {user_id} запросил получение задания")
 
     # Проверяем, есть ли уже активное задание
     active_task = await db.get_active_daily_task(user_id)
     if active_task:
-        await callback.message.edit_text(
+        logger.info(f"У пользователя {user_id} уже есть активное задание")
+        await message.answer(
             "❌ <b>У вас уже есть активное задание!</b>\n\n"
             "Сначала выполните текущее задание или дождитесь его истечения.\n\n"
             "Используйте кнопку '📋 Активные задания' для просмотра.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
-                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-            ])
+            reply_markup=create_main_menu_keyboard()
         )
         return
 
     # Получаем цель пользователя для генерации задания
     user = await db.get_user(user_id)
-    if not user or not user.goal:
-        await callback.message.edit_text(
-            "❌ <b>Цель не установлена!</b>\n\n"
-            "Сначала установите цель с помощью команды /start",
+    if not user:
+        logger.error(f"Пользователь {user_id} не найден в базе данных")
+        await message.answer(
+            "❌ <b>Ошибка получения данных пользователя!</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-            ])
+            reply_markup=create_main_menu_keyboard()
         )
         return
+
+    logger.info(f"Пользователь найден. is_complete: {user.is_complete}, goal: '{user.goal}'")
+
+    # Проверяем, завершена ли регистрация
+    if not user.is_complete:
+        logger.warning(f"Регистрация пользователя {user_id} не завершена")
+        await message.answer(
+            "❌ <b>Регистрация не завершена!</b>\n\n"
+            "Пожалуйста, завершите процесс регистрации.",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+
+    # Проверяем наличие цели
+    if not user.goal or len(user.goal.strip()) == 0:
+        logger.warning(f"Цель пользователя {user_id} пустая или не установлена: '{user.goal}'")
+        await message.answer(
+            "❌ <b>Цель не установлена!</b>\n\n"
+            "Используйте кнопку '👤 Профиль' для просмотра вашего профиля и установки цели.",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+
+    logger.info(f"Цель пользователя {user_id} найдена: '{user.goal}'")
 
     # Генерируем задание через ИИ
     task_description = await generate_daily_task(user.goal)
@@ -1375,37 +1443,30 @@ async def handle_get_task(callback: CallbackQuery, state: FSMContext):
 
     task_id = await db.save_daily_task(task)
 
-    await callback.message.edit_text(
+    await message.answer(
         f"🎯 <b>Новое задание получено!</b>\n\n"
         f"📝 <b>Задание:</b>\n{task_description}\n\n"
         f"⏰ <b>Время на выполнение:</b> 24 часа\n"
         f"🏆 <b>Награда:</b> +10 опыта, +1 к стрику\n\n"
         f"Удачи в выполнении!",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-        ])
+        reply_markup=create_main_menu_keyboard()
     )
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "active_tasks")
-async def handle_active_tasks(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "📋 Активные задания")
+async def handle_active_tasks(message: Message, state: FSMContext):
     """Обработка просмотра активных заданий"""
-    await callback.answer()
-    user_id = callback.from_user.id
+    user_id = message.from_user.id
 
     # Получаем активное задание
     active_task = await db.get_active_daily_task(user_id)
 
     if not active_task:
-        await callback.message.edit_text(
+        await message.answer(
             "📋 <b>Активных заданий нет</b>\n\n"
             "У вас нет активных заданий. Получите новое задание!",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
-                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-            ])
+            reply_markup=create_main_menu_keyboard()
         )
         return
 
@@ -1415,15 +1476,12 @@ async def handle_active_tasks(callback: CallbackQuery, state: FSMContext):
 
     if time_left <= 0:
         # Задание истекло
-        await callback.message.edit_text(
+        await message.answer(
             "⏰ <b>Задание истекло!</b>\n\n"
             "К сожалению, время на выполнение задания вышло.\n"
             "Получите новое задание!",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
-                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-            ])
+            reply_markup=create_main_menu_keyboard()
         )
         return
 
@@ -1431,24 +1489,29 @@ async def handle_active_tasks(callback: CallbackQuery, state: FSMContext):
     hours = time_left // 3600
     minutes = (time_left % 3600) // 60
 
-    await callback.message.edit_text(
+    await message.answer(
         f"📋 <b>Ваше активное задание</b>\n\n"
         f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
         f"⏰ <b>Осталось времени:</b> {hours}ч {minutes}мин\n"
         f"🏆 <b>Награда:</b> +10 опыта, +1 к стрику\n\n"
         f"Сделайте задание и отметьте его как выполненное!",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Отметить выполненным", callback_data=f"complete_task_{active_task.id}")],
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-        ])
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="✅ Отметить выполненным")],
+                [KeyboardButton(text="🎯 Получить задание"), KeyboardButton(text="👤 Профиль")],
+                [KeyboardButton(text="📋 Активные задания"), KeyboardButton(text="🎁 Призы")],
+                [KeyboardButton(text="💬 Поддержка")]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=False
+        )
     )
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "profile")
-async def handle_profile(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "👤 Профиль")
+async def handle_profile(message: Message, state: FSMContext):
     """Обработка просмотра профиля"""
-    await callback.answer()
-    user_id = callback.from_user.id
+    user_id = message.from_user.id
 
     # Получаем данные пользователя
     user = await db.get_user(user_id)
@@ -1456,13 +1519,11 @@ async def handle_profile(callback: CallbackQuery, state: FSMContext):
     user_statistics = await db.get_user_stats(user_id)
 
     if not user or not player_stats or not user_statistics:
-        await callback.message.edit_text(
+        await message.answer(
             "❌ <b>Ошибка загрузки профиля</b>\n\n"
             "Попробуйте позже или обратитесь в поддержку.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-            ])
+            reply_markup=create_main_menu_keyboard()
         )
         return
 
@@ -1475,7 +1536,19 @@ async def handle_profile(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
     ])
 
-    await callback.message.edit_text(
+    # Сначала отправляем изображение карточки, если оно существует
+    if player_stats.card_image_path and os.path.exists(player_stats.card_image_path):
+        try:
+            photo = FSInputFile(player_stats.card_image_path)
+            await message.answer_photo(
+                photo,
+                caption="🎮 <b>Ваша игровая карточка</b>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить карточку: {e}")
+
+    await message.answer(
         f"👤 <b>Профиль игрока</b>\n\n"
         f"🏆 <b>Ник:</b> {player_stats.nickname}\n"
         f"⭐ <b>Опыт:</b> {user_statistics.experience} | 📊 <b>Уровень:</b> {user_statistics.level}\n"
@@ -1494,12 +1567,11 @@ async def handle_profile(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard
     )
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "prizes")
-async def handle_prizes(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "🎁 Призы")
+async def handle_prizes(message: Message, state: FSMContext):
     """Обработка просмотра призов"""
-    await callback.answer()
 
-    await callback.message.edit_text(
+    await message.answer(
         "🎁 <b>Текущие призы</b>\n\n"
         "🏆 <b>Призы за достижения:</b>\n"
         "• 7 дней подряд - 🥉 Бронзовая медаль\n"
@@ -1514,18 +1586,14 @@ async def handle_prizes(callback: CallbackQuery, state: FSMContext):
         "Призы начисляются автоматически при достижении целей!\n\n"
         "<i>Следите за своими достижениями в профиле!</i>",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-        ])
+        reply_markup=create_main_menu_keyboard()
     )
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "support")
-async def handle_support(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "💬 Поддержка")
+async def handle_support(message: Message, state: FSMContext):
     """Обработка поддержки"""
-    await callback.answer()
 
-    await callback.message.edit_text(
+    await message.answer(
         "💬 <b>Поддержка</b>\n\n"
         "Если у вас возникли вопросы или проблемы:\n\n"
         "📧 <b>Email:</b> support@motivationbot.com\n"
@@ -1536,17 +1604,25 @@ async def handle_support(callback: CallbackQuery, state: FSMContext):
         "Сб-Вс: 10:00 - 16:00 (MSK)\n\n"
         "Мы всегда готовы помочь! 🚀",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-        ])
+        reply_markup=create_main_menu_keyboard()
     )
 
-@router.callback_query(lambda c: c.data.startswith("complete_task_"))
-async def handle_complete_task(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "✅ Отметить выполненным")
+async def handle_complete_task(message: Message, state: FSMContext):
     """Обработка завершения задания"""
-    await callback.answer()
-    task_id = int(callback.data.replace("complete_task_", ""))
-    user_id = callback.from_user.id
+    user_id = message.from_user.id
+
+    # Получаем активное задание пользователя
+    active_task = await db.get_active_daily_task(user_id)
+    if not active_task:
+        await message.answer(
+            "❌ <b>У вас нет активного задания для отметки!</b>",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+
+    task_id = active_task.id
 
     # Отмечаем задание как выполненное
     success = await db.complete_daily_task(task_id)
@@ -1592,7 +1668,7 @@ async def handle_complete_task(callback: CallbackQuery, state: FSMContext):
             )
             await db.save_user_stats(updated_stats)
 
-            await callback.message.edit_text(
+            await message.answer(
                 f"🎉 <b>Задание выполнено!</b>\n\n"
                 f"✅ <b>Награда получена:</b>\n"
                 f"⭐ +10 опыта\n"
@@ -1601,29 +1677,21 @@ async def handle_complete_task(callback: CallbackQuery, state: FSMContext):
                 f"🔥 Стрик: {new_streak} дней\n\n"
                 f"Продолжайте в том же духе!",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🎯 Новое задание", callback_data="get_task")],
-                    [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-                    [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-                ])
+                reply_markup=create_main_menu_keyboard()
             )
         else:
-            await callback.message.edit_text(
+            await message.answer(
                 "✅ <b>Задание выполнено!</b>\n\n"
                 "Статистика обновлена!",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-                ])
+                reply_markup=create_main_menu_keyboard()
             )
     else:
-        await callback.message.edit_text(
+        await message.answer(
             "❌ <b>Ошибка выполнения задания</b>\n\n"
             "Попробуйте позже или обратитесь в поддержку.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-            ])
+            reply_markup=create_main_menu_keyboard()
         )
 
 def calculate_rank(level: int, best_streak: int, total_tasks: int) -> Rank:
@@ -1649,7 +1717,7 @@ def calculate_rank(level: int, best_streak: int, total_tasks: int) -> Rank:
 
 # Обработчики подменю профиля
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "rating")
+@router.callback_query(lambda c: c.data == "rating")
 async def handle_rating(callback: CallbackQuery, state: FSMContext):
     """Обработка просмотра рейтинга"""
     await callback.answer()
@@ -1703,7 +1771,7 @@ async def handle_rating(callback: CallbackQuery, state: FSMContext):
         ])
     )
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "change_photo")
+@router.callback_query(lambda c: c.data == "change_photo")
 async def handle_change_photo(callback: CallbackQuery, state: FSMContext):
     """Обработка замены фотографии"""
     await callback.answer()
@@ -1722,7 +1790,7 @@ async def handle_change_photo(callback: CallbackQuery, state: FSMContext):
     # Устанавливаем состояние для замены фото
     await state.set_state(UserRegistration.waiting_for_player_photo)
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "payment_info")
+@router.callback_query(lambda c: c.data == "payment_info")
 async def handle_payment_info(callback: CallbackQuery, state: FSMContext):
     """Обработка информации об оплате"""
     await callback.answer()
@@ -1767,7 +1835,7 @@ async def handle_payment_info(callback: CallbackQuery, state: FSMContext):
         ])
     )
 
-@router.callback_query(UserRegistration.main_menu, lambda c: c.data == "change_goal")
+@router.callback_query(lambda c: c.data == "change_goal")
 async def handle_change_goal(callback: CallbackQuery, state: FSMContext):
     """Обработка смены цели"""
     await callback.answer()
@@ -1783,7 +1851,51 @@ async def handle_change_goal(callback: CallbackQuery, state: FSMContext):
     )
 
     # Устанавливаем состояние для ввода новой цели
-    await state.set_state(UserRegistration.waiting_for_goal)
+    await state.set_state(UserRegistration.changing_goal)
+
+@router.message(UserRegistration.changing_goal)
+async def process_goal_change(message: Message, state: FSMContext):
+    """Обработка новой цели пользователя"""
+    user_id = message.from_user.id
+    goal = message.text.strip()
+
+    if len(goal) < 3:
+        await message.answer(
+            "Пожалуйста, опишите вашу цель более подробно (минимум 3 символа):"
+        )
+        return
+
+    logger.info(f"Пользователь {user_id} меняет цель на: '{goal}'")
+
+    # Улучшаем цель с помощью ИИ
+    await message.answer("🤖 Улучшаю формулировку вашей цели...")
+    improved_goal = await improve_goal_with_ai(goal)
+
+    # Сохраняем новую цель в базу данных
+    user = await db.get_user(user_id)
+    if user:
+        # Обновляем цель пользователя
+        await db.update_user_field(user_id, 'goal', improved_goal)
+        logger.info(f"Цель пользователя {user_id} обновлена на: '{improved_goal}'")
+
+        await message.answer(
+            f"✅ <b>Цель успешно обновлена!</b>\n\n"
+            f"🎯 <b>Ваша новая цель:</b>\n"
+            f"<i>{improved_goal}</i>\n\n"
+            f"Теперь вы можете получать персонализированные задания по этой цели.",
+            parse_mode="HTML"
+        )
+
+        # Очищаем состояние и возвращаемся в главное меню
+        await state.clear()
+        await show_main_menu(message)
+    else:
+        logger.error(f"Пользователь {user_id} не найден при обновлении цели")
+        await message.answer(
+            "❌ <b>Ошибка обновления цели</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML"
+        )
 
 @router.callback_query(lambda c: c.data == "back_to_menu")
 async def handle_back_to_menu(callback: CallbackQuery, state: FSMContext):
@@ -1794,13 +1906,15 @@ async def handle_back_to_menu(callback: CallbackQuery, state: FSMContext):
         "🎮 <b>Главное меню</b>\n\n"
         "Выберите действие:",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎯 Получить задание", callback_data="get_task")],
-            [InlineKeyboardButton(text="📋 Активные задания", callback_data="active_tasks")],
-            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-            [InlineKeyboardButton(text="🎁 Призы", callback_data="prizes")],
-            [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")]
-        ])
+        reply_markup=None
+    )
+
+    # Отправляем новое сообщение с клавиатурой главного меню
+    await callback.message.answer(
+        "🎮 <b>Главное меню</b>\n\n"
+        "Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=create_main_menu_keyboard()
     )
 
 @router.callback_query(lambda c: c.data == "subscribe")
@@ -1833,24 +1947,7 @@ async def generate_daily_task(user_goal: str) -> str:
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_context)
 
-        task_prompt = f"""
-        Создай конкретное, выполнимое ежедневное задание для человека, цель которого: "{user_goal}"
-
-        Требования к заданию:
-        1. Задание должно быть конкретным и измеримым
-        2. Выполнимым в течение одного дня
-        3. Связанным с основной целью пользователя
-        4. Мотивирующим и позитивным
-        5. Не слишком сложным, но требующим усилий
-
-        Примеры хороших заданий:
-        - "Прочитать 10 страниц книги по программированию"
-        - "Сделать 20 минут кардио тренировки"
-        - "Написать 500 слов для статьи"
-        - "Выучить 5 новых английских слов"
-
-        Верни ТОЛЬКО текст задания, без дополнительных комментариев.
-        """
+        task_prompt = TASK_GENERATION_TEMPLATE.format(user_goal=user_goal)
 
         async with aiohttp.ClientSession(connector=connector) as session:
             payload = {
