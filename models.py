@@ -73,3 +73,19 @@ class Subscription:
     auto_renew: bool = False
     created_at: int = 0  # timestamp создания
     updated_at: int = 0  # timestamp обновления
+
+@dataclass
+class PlayerStats:
+    id: Optional[int] = None
+    user_id: int = 0
+    nickname: Optional[str] = None  # ник игрока
+    experience: int = 0  # опыт игрока
+    strength: int = 50  # сила (0-100)
+    agility: int = 50    # ловкость (0-100)
+    endurance: int = 50  # выносливость (0-100)
+    intelligence: int = 50  # интеллект (0-100)
+    charisma: int = 50    # харизма (0-100)
+    photo_path: Optional[str] = None  # путь к фото
+    card_image_path: Optional[str] = None  # путь к изображению карточки
+    created_at: int = 0  # timestamp создания
+    updated_at: int = 0  # timestamp обновления

@@ -183,3 +183,11 @@ Thumbs.db
 
 # Project specific
 bot_database.db
+
+# Player photos (keep .gitkeep, ignore photos)
+player_photos/*.jpg
+player_photos/*.jpeg
+player_photos/*.png
+
+# Player cards (keep .gitkeep, ignore cards)
+player_cards/*.png

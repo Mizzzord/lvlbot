@@ -3,7 +3,7 @@ import datetime
 import logging
 from datetime import date
 from typing import Optional
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +74,32 @@ class Database:
                 )
             ''')
 
+            # Создаем таблицу статов игрока
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS player_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE,
+                    nickname TEXT,
+                    experience INTEGER DEFAULT 0,
+                    strength INTEGER DEFAULT 50,
+                    agility INTEGER DEFAULT 50,
+                    endurance INTEGER DEFAULT 50,
+                    intelligence INTEGER DEFAULT 50,
+                    charisma INTEGER DEFAULT 50,
+                    photo_path TEXT,
+                    card_image_path TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id)
+                )
+            ''')
+
             # Создаем индексы для производительности
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_player_stats_user_id ON player_stats(user_id)')
 
             # Добавляем недостающие колонки для существующих баз данных
             await self._add_missing_columns(db)
@@ -120,6 +141,23 @@ class Database:
             try:
                 await db.execute(f'ALTER TABLE payments ADD COLUMN {column_name} {column_type}')
                 logger.info(f"Колонка {column_name} добавлена в таблицу payments")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+        # Поля для таблицы player_stats
+        player_stats_columns = [
+            ('nickname', 'TEXT'),
+            ('experience', 'INTEGER DEFAULT 0'),
+            ('intelligence', 'INTEGER DEFAULT 50'),
+            ('charisma', 'INTEGER DEFAULT 50'),
+            ('card_image_path', 'TEXT')
+        ]
+
+        for column_name, column_type in player_stats_columns:
+            try:
+                await db.execute(f'ALTER TABLE player_stats ADD COLUMN {column_name} {column_type}')
+                logger.info(f"Колонка {column_name} добавлена в таблицу player_stats")
             except aiosqlite.OperationalError:
                 # Колонка уже существует
                 pass
@@ -460,3 +498,68 @@ class Database:
             ''', (user_id,))
             await db.commit()
             logger.info(f"Подписка пользователя {user_id} деактивирована")
+
+    # Методы для работы со статами игрока
+
+    async def save_player_stats(self, stats: PlayerStats) -> int:
+        """Сохранение или обновление статов игрока"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO player_stats (user_id, nickname, experience, strength, agility, endurance, intelligence, charisma, photo_path, card_image_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    nickname = excluded.nickname,
+                    experience = excluded.experience,
+                    strength = excluded.strength,
+                    agility = excluded.agility,
+                    endurance = excluded.endurance,
+                    intelligence = excluded.intelligence,
+                    charisma = excluded.charisma,
+                    photo_path = excluded.photo_path,
+                    card_image_path = excluded.card_image_path,
+                    updated_at = excluded.updated_at
+            ''', (
+                stats.user_id,
+                stats.nickname,
+                stats.experience,
+                stats.strength,
+                stats.agility,
+                stats.endurance,
+                stats.intelligence,
+                stats.charisma,
+                stats.photo_path,
+                stats.card_image_path,
+                stats.created_at,
+                stats.updated_at
+            ))
+            stats_id = cursor.lastrowid or stats.id
+            await db.commit()
+            logger.info(f"Стати игрока для пользователя {stats.user_id} сохранены")
+            return stats_id
+
+    async def get_player_stats(self, user_id: int) -> Optional[PlayerStats]:
+        """Получение статов игрока"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM player_stats WHERE user_id = ?
+            ''', (user_id,))
+
+            row = await cursor.fetchone()
+            if row:
+                return PlayerStats(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    nickname=row['nickname'],
+                    experience=row['experience'],
+                    strength=row['strength'],
+                    agility=row['agility'],
+                    endurance=row['endurance'],
+                    intelligence=row['intelligence'],
+                    charisma=row['charisma'],
+                    photo_path=row['photo_path'],
+                    card_image_path=row['card_image_path'],
+                    created_at=row['created_at'],
+                    updated_at=row['updated_at']
+                )
+            return None
