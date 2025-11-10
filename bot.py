@@ -19,7 +19,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKey
 
 from config import BOT_TOKEN
 from database import Database
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus
 from openrouter_config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT,
     PHOTO_ANALYSIS_PROMPT, TASK_GENERATION_TEMPLATE
@@ -1438,7 +1438,7 @@ async def handle_get_task(message: Message, state: FSMContext):
         task_description=task_description,
         created_at=current_time,
         expires_at=expires_at,
-        completed=False
+        status=TaskStatus.PENDING
     )
 
     task_id = await db.save_daily_task(task)
@@ -1446,8 +1446,8 @@ async def handle_get_task(message: Message, state: FSMContext):
     await message.answer(
         f"🎯 <b>Новое задание получено!</b>\n\n"
         f"📝 <b>Задание:</b>\n{task_description}\n\n"
-        f"⏰ <b>Время на выполнение:</b> 24 часа\n"
-        f"🏆 <b>Награда:</b> +10 опыта, +1 к стрику\n\n"
+        f"⏰ <b>Время на выполнение:</b> 24 часа\n\n"
+        f"📸 <b>Для сдачи задания:</b> отправьте фото или видео выполнения\n\n"
         f"Удачи в выполнении!",
         parse_mode="HTML",
         reply_markup=create_main_menu_keyboard()
@@ -1493,19 +1493,10 @@ async def handle_active_tasks(message: Message, state: FSMContext):
         f"📋 <b>Ваше активное задание</b>\n\n"
         f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
         f"⏰ <b>Осталось времени:</b> {hours}ч {minutes}мин\n"
-        f"🏆 <b>Награда:</b> +10 опыта, +1 к стрику\n\n"
-        f"Сделайте задание и отметьте его как выполненное!",
+        f"📸 <b>Статус:</b> Ожидает выполнения\n\n"
+        f"Для сдачи задания отправьте фото или видео выполнения в чат!",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="✅ Отметить выполненным")],
-                [KeyboardButton(text="🎯 Получить задание"), KeyboardButton(text="👤 Профиль")],
-                [KeyboardButton(text="📋 Активные задания"), KeyboardButton(text="🎁 Призы")],
-                [KeyboardButton(text="💬 Поддержка")]
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=False
-        )
+        reply_markup=create_main_menu_keyboard()
     )
 
 @router.message(F.text == "👤 Профиль")
@@ -1607,89 +1598,80 @@ async def handle_support(message: Message, state: FSMContext):
         reply_markup=create_main_menu_keyboard()
     )
 
-@router.message(F.text == "✅ Отметить выполненным")
-async def handle_complete_task(message: Message, state: FSMContext):
-    """Обработка завершения задания"""
+# Обработчики медиафайлов для сдачи заданий
+@router.message(F.photo)
+async def handle_task_submission_photo(message: Message, state: FSMContext):
+    """Обработка отправки фото для сдачи задания"""
+    await handle_task_submission(message, state, "photo")
+
+@router.message(F.video)
+async def handle_task_submission_video(message: Message, state: FSMContext):
+    """Обработка отправки видео для сдачи задания"""
+    await handle_task_submission(message, state, "video")
+
+async def handle_task_submission(message: Message, state: FSMContext, media_type: str):
+    """Обработка отправки медиафайла для сдачи задания"""
     user_id = message.from_user.id
 
     # Получаем активное задание пользователя
     active_task = await db.get_active_daily_task(user_id)
     if not active_task:
         await message.answer(
-            "❌ <b>У вас нет активного задания для отметки!</b>",
+            "❌ <b>У вас нет активного задания для сдачи!</b>\n\n"
+            "Сначала получите задание через меню.",
             parse_mode="HTML",
             reply_markup=create_main_menu_keyboard()
         )
         return
 
-    task_id = active_task.id
+    try:
+        # Создаем директорию для медиафайлов заданий
+        media_dir = "task_submissions"
+        os.makedirs(media_dir, exist_ok=True)
 
-    # Отмечаем задание как выполненное
-    success = await db.complete_daily_task(task_id)
+        # Определяем файл и сохраняем его
+        if media_type == "photo":
+            media_file = message.photo[-1]  # Самое большое фото
+            file_extension = "jpg"
+            file_name = f"{media_dir}/task_{active_task.id}_{user_id}_{int(datetime.datetime.now().timestamp())}.jpg"
+        else:  # video
+            media_file = message.video
+            file_extension = media_file.file_name.split('.')[-1] if media_file.file_name else "mp4"
+            file_name = f"{media_dir}/task_{active_task.id}_{user_id}_{int(datetime.datetime.now().timestamp())}.mp4"
 
-    if success:
-        # Получаем текущую статистику пользователя
-        user_stats = await db.get_user_stats(user_id)
-        if user_stats:
-            # Обновляем статистику
-            current_time = int(datetime.datetime.now().timestamp())
-            today = current_time // (24 * 60 * 60)  # День в timestamp
+        # Скачиваем файл
+        file_bytes = await bot.download(media_file.file_id)
 
-            # Проверяем, выполнялось ли задание сегодня
-            task_completed_today = False
-            if user_stats.last_task_date:
-                last_task_day = user_stats.last_task_date // (24 * 60 * 60)
-                task_completed_today = (today == last_task_day)
+        # Сохраняем файл
+        with open(file_name, 'wb') as f:
+            f.write(file_bytes.read())
 
-            # Обновляем статистику
-            new_experience = user_stats.experience + 10
-            new_total_tasks = user_stats.total_tasks_completed + 1
+        # Обновляем статус задания в базе данных
+        success = await db.submit_daily_task_media(active_task.id, file_name)
 
-            # Рассчитываем новый уровень (каждые 100 опыта = новый уровень)
-            new_level = (new_experience // 100) + 1
-
-            # Обновляем стрик
-            new_streak = user_stats.current_streak + 1 if task_completed_today else 1
-            new_best_streak = max(user_stats.best_streak, new_streak)
-
-            # Рассчитываем ранг на основе уровня и стриков
-            new_rank = calculate_rank(new_level, new_best_streak, new_total_tasks)
-
-            # Сохраняем обновленную статистику
-            updated_stats = UserStats(
-                user_id=user_id,
-                level=new_level,
-                experience=new_experience,
-                rank=new_rank,
-                current_streak=new_streak,
-                best_streak=new_best_streak,
-                total_tasks_completed=new_total_tasks,
-                last_task_date=current_time
-            )
-            await db.save_user_stats(updated_stats)
-
+        if success:
             await message.answer(
-                f"🎉 <b>Задание выполнено!</b>\n\n"
-                f"✅ <b>Награда получена:</b>\n"
-                f"⭐ +10 опыта\n"
-                f"📊 Уровень: {new_level} (+{new_level - user_stats.level})\n"
-                f"🏅 Ранг: {new_rank.value}\n"
-                f"🔥 Стрик: {new_streak} дней\n\n"
-                f"Продолжайте в том же духе!",
+                f"✅ <b>Задание отправлено на проверку!</b>\n\n"
+                f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
+                f"⏳ <b>Статус:</b> Ожидает модерации\n\n"
+                f"Вы получите уведомление о результате проверки.",
                 parse_mode="HTML",
                 reply_markup=create_main_menu_keyboard()
             )
+            logger.info(f"Пользователь {user_id} отправил {media_type} для задания {active_task.id}")
         else:
             await message.answer(
-                "✅ <b>Задание выполнено!</b>\n\n"
-                "Статистика обновлена!",
+                "❌ <b>Ошибка отправки задания</b>\n\n"
+                "Попробуйте отправить файл еще раз.",
                 parse_mode="HTML",
                 reply_markup=create_main_menu_keyboard()
             )
-    else:
+
+    except Exception as e:
+        logger.error(f"Ошибка обработки медиафайла от пользователя {user_id}: {e}")
         await message.answer(
-            "❌ <b>Ошибка выполнения задания</b>\n\n"
-            "Попробуйте позже или обратитесь в поддержку.",
+            "❌ <b>Ошибка обработки файла</b>\n\n"
+            "Попробуйте отправить файл в другом формате или обратитесь в поддержку.",
             parse_mode="HTML",
             reply_markup=create_main_menu_keyboard()
         )

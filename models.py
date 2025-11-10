@@ -100,6 +100,13 @@ class Rank(Enum):
     S = "S"
     S_PLUS = "S+"
 
+class TaskStatus(Enum):
+    PENDING = "pending"      # задание выдано, ожидает выполнения
+    SUBMITTED = "submitted"  # пользователь отправил медиафайл, ожидает модерации
+    APPROVED = "approved"    # задание одобрено модератором
+    REJECTED = "rejected"    # задание отклонено модератором
+    EXPIRED = "expired"      # время на выполнение вышло
+
 @dataclass
 class DailyTask:
     id: Optional[int] = None
@@ -107,8 +114,10 @@ class DailyTask:
     task_description: str = ""
     created_at: int = 0  # timestamp создания
     expires_at: int = 0   # timestamp окончания (24 часа)
-    completed: bool = False
+    status: TaskStatus = TaskStatus.PENDING
     completed_at: Optional[int] = None  # timestamp выполнения
+    submitted_media_path: Optional[str] = None  # путь к загруженному медиафайлу
+    moderator_comment: Optional[str] = None  # комментарий модератора
 
 @dataclass
 class UserStats:

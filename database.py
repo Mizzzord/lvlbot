@@ -102,8 +102,10 @@ class Database:
                     task_description TEXT,
                     created_at INTEGER,
                     expires_at INTEGER,
-                    completed BOOLEAN DEFAULT FALSE,
+                    status TEXT DEFAULT 'pending',
                     completed_at INTEGER,
+                    submitted_media_path TEXT,
+                    moderator_comment TEXT,
                     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
                 )
             ''')
@@ -190,6 +192,21 @@ class Database:
             try:
                 await db.execute(f'ALTER TABLE player_stats ADD COLUMN {column_name} {column_type}')
                 logger.info(f"Колонка {column_name} добавлена в таблицу player_stats")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+        # Поля для таблицы daily_tasks
+        daily_tasks_columns = [
+            ('status', "TEXT DEFAULT 'pending'"),
+            ('submitted_media_path', 'TEXT'),
+            ('moderator_comment', 'TEXT')
+        ]
+
+        for column_name, column_type in daily_tasks_columns:
+            try:
+                await db.execute(f'ALTER TABLE daily_tasks ADD COLUMN {column_name} {column_type}')
+                logger.info(f"Колонка {column_name} добавлена в таблицу daily_tasks")
             except aiosqlite.OperationalError:
                 # Колонка уже существует
                 pass
@@ -602,15 +619,17 @@ class Database:
         """Сохранение ежедневного задания"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
-                INSERT INTO daily_tasks (user_id, task_description, created_at, expires_at, completed, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO daily_tasks (user_id, task_description, created_at, expires_at, status, completed_at, submitted_media_path, moderator_comment)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 task.user_id,
                 task.task_description,
                 task.created_at,
                 task.expires_at,
-                task.completed,
-                task.completed_at
+                task.status.value,
+                task.completed_at,
+                task.submitted_media_path,
+                task.moderator_comment
             ))
             task_id = cursor.lastrowid
             await db.commit()
@@ -618,12 +637,12 @@ class Database:
             return task_id
 
     async def get_active_daily_task(self, user_id: int) -> Optional[DailyTask]:
-        """Получение активного ежедневного задания пользователя"""
+        """Получение активного ежедневного задания пользователя (ожидающего выполнения)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute('''
                 SELECT * FROM daily_tasks
-                WHERE user_id = ? AND completed = FALSE AND expires_at > ?
+                WHERE user_id = ? AND status = 'pending' AND expires_at > ?
                 ORDER BY created_at DESC
                 LIMIT 1
             ''', (user_id, int(datetime.datetime.now().timestamp())))
@@ -636,26 +655,86 @@ class Database:
                     task_description=row['task_description'],
                     created_at=row['created_at'],
                     expires_at=row['expires_at'],
-                    completed=row['completed'],
-                    completed_at=row['completed_at']
+                    status=TaskStatus(row['status']),
+                    completed_at=row['completed_at'],
+                    submitted_media_path=row['submitted_media_path'],
+                    moderator_comment=row['moderator_comment']
                 )
             return None
 
-    async def complete_daily_task(self, task_id: int) -> bool:
-        """Отметить задание как выполненное"""
+    async def submit_daily_task_media(self, task_id: int, media_path: str) -> bool:
+        """Отправить медиафайл для задания на модерацию"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                UPDATE daily_tasks
+                SET status = 'submitted', submitted_media_path = ?
+                WHERE id = ? AND status = 'pending'
+            ''', (media_path, task_id))
+            await db.commit()
+
+            if cursor.rowcount > 0:
+                logger.info(f"Медиафайл для задания {task_id} отправлен на модерацию")
+                return True
+            return False
+
+    async def approve_daily_task(self, task_id: int, moderator_comment: str = None) -> bool:
+        """Одобрить задание модератором"""
         async with aiosqlite.connect(self.db_path) as db:
             current_time = int(datetime.datetime.now().timestamp())
             cursor = await db.execute('''
                 UPDATE daily_tasks
-                SET completed = TRUE, completed_at = ?
-                WHERE id = ?
-            ''', (current_time, task_id))
+                SET status = 'approved', completed_at = ?, moderator_comment = ?
+                WHERE id = ? AND status = 'submitted'
+            ''', (current_time, moderator_comment, task_id))
             await db.commit()
 
             if cursor.rowcount > 0:
-                logger.info(f"Задание {task_id} отмечено как выполненное")
+                logger.info(f"Задание {task_id} одобрено модератором")
                 return True
             return False
+
+    async def reject_daily_task(self, task_id: int, moderator_comment: str) -> bool:
+        """Отклонить задание модератором"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                UPDATE daily_tasks
+                SET status = 'rejected', moderator_comment = ?
+                WHERE id = ? AND status = 'submitted'
+            ''', (moderator_comment, task_id))
+            await db.commit()
+
+            if cursor.rowcount > 0:
+                logger.info(f"Задание {task_id} отклонено модератором")
+                return True
+            return False
+
+    async def get_pending_moderation_tasks(self) -> list[DailyTask]:
+        """Получить задания, ожидающие модерации"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM daily_tasks
+                WHERE status = 'submitted'
+                ORDER BY created_at ASC
+            ''')
+
+            rows = await cursor.fetchall()
+            tasks = []
+
+            for row in rows:
+                tasks.append(DailyTask(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    task_description=row['task_description'],
+                    created_at=row['created_at'],
+                    expires_at=row['expires_at'],
+                    status=TaskStatus(row['status']),
+                    completed_at=row['completed_at'],
+                    submitted_media_path=row['submitted_media_path'],
+                    moderator_comment=row['moderator_comment']
+                ))
+
+            return tasks
 
     # Методы для работы со статистикой пользователей
 
