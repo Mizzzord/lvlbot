@@ -19,7 +19,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKey
 
 from config import BOT_TOKEN
 from database import Database
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
 from openrouter_config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT,
     PHOTO_ANALYSIS_PROMPT, TASK_GENERATION_TEMPLATE
@@ -1315,6 +1315,9 @@ async def process_player_photo(message: Message, state: FSMContext):
         )
         await db.save_user_stats(user_statistics)
 
+        # Обновляем рейтинг среди подписчиков блогера
+        await db.update_user_referral_rank(user_id)
+
         # Отправляем изображение карточки
         if card_image_path and os.path.exists(card_image_path):
             try:
@@ -1523,8 +1526,7 @@ async def handle_profile(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📊 Рейтинг", callback_data="rating")],
         [InlineKeyboardButton(text="📸 Заменить фотографию", callback_data="change_photo")],
         [InlineKeyboardButton(text="💳 Оплата", callback_data="payment_info")],
-        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")],
-        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")]
     ])
 
     # Сначала отправляем изображение карточки, если оно существует
@@ -1558,24 +1560,94 @@ async def handle_profile(message: Message, state: FSMContext):
         reply_markup=keyboard
     )
 
+def get_achievement_description(achievement_type: str, achievement_value: int) -> str:
+    """Получение описания достижения"""
+    if achievement_type == 'rank':
+        rank_names = ['F', 'E', 'D', 'C', 'B', 'A', 'S', 'S+']
+        rank_name = rank_names[achievement_value - 1] if 0 <= achievement_value - 1 < len(rank_names) else f"неизвестный ({achievement_value})"
+        return f'Достижение ранга {rank_name}'
+
+    descriptions = {
+        'streak': f'Стрик {achievement_value} дней подряд',
+        'level': f'Достижение уровня {achievement_value}',
+        'tasks': f'Выполнение {achievement_value} заданий',
+        'experience': f'Набор {achievement_value} опыта'
+    }
+    return descriptions.get(achievement_type, f'{achievement_type}: {achievement_value}')
+
+def get_profile_text(user, player_stats, user_statistics) -> str:
+    """Формирование текста профиля"""
+    referral_text = f"🔗 <b>Реферальный код:</b> {user.referral_code}\n" if user.referral_code else ""
+
+    return (
+        f"👤 <b>Профиль игрока</b>\n\n"
+        f"🏆 <b>Ник:</b> {player_stats.nickname}\n"
+        f"⭐ <b>Опыт:</b> {user_statistics.experience} | 📊 <b>Уровень:</b> {user_statistics.level}\n"
+        f"🏅 <b>Ранг:</b> {user_statistics.rank.value} | 🔥 <b>Стрик:</b> {user_statistics.current_streak} дней\n"
+        f"🎯 <b>Лучший стрик:</b> {user_statistics.best_streak} дней\n"
+        f"✅ <b>Выполнено заданий:</b> {user_statistics.total_tasks_completed}\n"
+        f"{referral_text}\n"
+        f"🏆 <b>Характеристики:</b>\n"
+        f"💪 <b>Сила:</b> {player_stats.strength}/100\n"
+        f"🤸 <b>Ловкость:</b> {player_stats.agility}/100\n"
+        f"🏃 <b>Выносливость:</b> {player_stats.endurance}/100\n"
+        f"🧠 <b>Интеллект:</b> {player_stats.intelligence}/100\n"
+        f"✨ <b>Харизма:</b> {player_stats.charisma}/100\n\n"
+        f"🎮 <b>Выберите действие:</b>"
+    )
+
 @router.message(F.text == "🎁 Призы")
 async def handle_prizes(message: Message, state: FSMContext):
     """Обработка просмотра призов"""
+    user_id = message.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+
+    # Получаем призы от главного модератора
+    admin_prizes = await db.get_prizes(prize_type=PrizeType.ADMIN, is_active=True)
+
+    # Получаем призы от блогера (если есть реферальный код)
+    blogger_prizes = []
+    if user and user.referral_code:
+        blogger_prizes = await db.get_prizes(prize_type=PrizeType.BLOGGER, referral_code=user.referral_code, is_active=True)
+
+    prize_text = "🎁 <b>Текущие призы</b>\n\n"
+
+    # Призы от главного модератора
+    if admin_prizes:
+        prize_text += "👑 <b>Призы от главного модератора:</b>\n"
+        for prize in admin_prizes:
+            prize_text += f"{prize.emoji} <b>{prize.title}</b>\n"
+            if prize.description:
+                prize_text += f"   └ {prize.description}\n"
+            prize_text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n\n"
+    else:
+        prize_text += "👑 <b>Призы от главного модератора:</b>\n"
+        prize_text += "   └ Пока нет активных призов\n\n"
+
+    # Призы от блогера
+    if user and user.referral_code:
+        if blogger_prizes:
+            prize_text += f"📣 <b>Призы от блогера '{user.referral_code}':</b>\n"
+            for prize in blogger_prizes:
+                prize_text += f"{prize.emoji} <b>{prize.title}</b>\n"
+                if prize.description:
+                    prize_text += f"   └ {prize.description}\n"
+                prize_text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n\n"
+        else:
+            prize_text += f"📣 <b>Призы от блогера '{user.referral_code}':</b>\n"
+            prize_text += "   └ Пока нет активных призов\n\n"
+    else:
+        prize_text += "📣 <b>Призы от блогера:</b>\n"
+        prize_text += "   └ Укажите реферальный код блогера в профиле для просмотра его призов\n\n"
+
+    prize_text += "🏆 <b>Система достижений:</b>\n"
+    prize_text += "Призы начисляются автоматически при достижении целей!\n\n"
+    prize_text += "<i>Следите за своими достижениями в профиле!</i>"
 
     await message.answer(
-        "🎁 <b>Текущие призы</b>\n\n"
-        "🏆 <b>Призы за достижения:</b>\n"
-        "• 7 дней подряд - 🥉 Бронзовая медаль\n"
-        "• 14 дней подряд - 🥈 Серебряная медаль\n"
-        "• 30 дней подряд - 🥇 Золотая медаль\n"
-        "• 50 заданий выполнено - 💎 Кристалл мотивации\n\n"
-        "🎯 <b>Призы за ранги:</b>\n"
-        "• Ранг C - 🎖️ Почетная грамота\n"
-        "• Ранг B - 🏅 Специальный значок\n"
-        "• Ранг A - 👑 Корона чемпиона\n"
-        "• Ранг S - 🌟 Звезда легенды\n\n"
-        "Призы начисляются автоматически при достижении целей!\n\n"
-        "<i>Следите за своими достижениями в профиле!</i>",
+        prize_text,
         parse_mode="HTML",
         reply_markup=create_main_menu_keyboard()
     )
@@ -1725,6 +1797,11 @@ async def handle_rating(callback: CallbackQuery, state: FSMContext):
     # Получаем топ пользователей по рангу
     rank_rating = await db.get_top_users_by_rank(user_stats.rank.value, 10)
 
+    # Получаем топ пользователей среди подписчиков блогера (если есть реферальный код)
+    referral_rating = None
+    if user.referral_code:
+        referral_rating = await db.get_top_users_by_referral_code(user.referral_code, 10)
+
     rating_text = "📊 <b>Рейтинг</b>\n\n"
 
     # Рейтинг по городу
@@ -1745,13 +1822,81 @@ async def handle_rating(callback: CallbackQuery, state: FSMContext):
     else:
         rating_text += "Пока нет данных\n"
 
+    rating_text += "\n"
+
+    # Рейтинг среди подписчиков блогера (если есть реферальный код)
+    if user.referral_code and referral_rating:
+        rating_text += f"📣 <b>Топ подписчиков блогера '{user.referral_code}':</b>\n"
+        for i, (name, level, exp, ref_rank, city) in enumerate(referral_rating, 1):
+            rating_text += f"{i}. {name} - Ур.{level} ({ref_rank if ref_rank else 'Нет ранга'})\n"
+    elif user.referral_code:
+        rating_text += f"📣 <b>Топ подписчиков блогера '{user.referral_code}':</b>\n"
+        rating_text += "Пока нет данных\n"
+
     await callback.message.edit_text(
         rating_text,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_profile")]
         ])
     )
+
+@router.callback_query(lambda c: c.data == "back_to_profile")
+async def handle_back_to_profile(callback: CallbackQuery, state: FSMContext):
+    """Обработка возврата в профиль"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+    player_stats = await db.get_player_stats(user_id)
+    user_statistics = await db.get_user_stats(user_id)
+
+    if not user or not player_stats or not user_statistics:
+        await callback.message.edit_text(
+            "❌ <b>Ошибка загрузки профиля</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+        return
+
+    # Показываем профиль с подменю
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Рейтинг", callback_data="rating")],
+        [InlineKeyboardButton(text="📸 Заменить фотографию", callback_data="change_photo")],
+        [InlineKeyboardButton(text="💳 Оплата", callback_data="payment_info")],
+        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")]
+    ])
+
+    # Сначала отправляем изображение карточки, если оно существует
+    if player_stats.card_image_path and os.path.exists(player_stats.card_image_path):
+        try:
+            photo = FSInputFile(player_stats.card_image_path)
+            await callback.message.delete()  # Удаляем сообщение рейтинга
+            await callback.message.answer_photo(
+                photo,
+                caption=get_profile_text(user, player_stats, user_statistics),
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото профиля: {e}")
+            # Если не удалось отправить фото, отправляем текстовую версию
+            await callback.message.edit_text(
+                get_profile_text(user, player_stats, user_statistics),
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+    else:
+        # Отправляем текстовую версию профиля
+        await callback.message.edit_text(
+            get_profile_text(user, player_stats, user_statistics),
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
 
 @router.callback_query(lambda c: c.data == "change_photo")
 async def handle_change_photo(callback: CallbackQuery, state: FSMContext):

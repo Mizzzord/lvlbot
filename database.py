@@ -3,7 +3,7 @@ import datetime
 import logging
 from datetime import date
 from typing import Optional
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,23 @@ class Database:
                 )
             ''')
 
+            # Создаем таблицу призов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS prizes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prize_type TEXT NOT NULL,
+                    referral_code TEXT,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    achievement_type TEXT NOT NULL,
+                    achievement_value INTEGER NOT NULL,
+                    emoji TEXT DEFAULT '🎁',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            ''')
+
             # Создаем индексы для производительности
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)')
@@ -134,9 +151,14 @@ class Database:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_daily_tasks_user_id ON daily_tasks(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_daily_tasks_expires_at ON daily_tasks(expires_at)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_stats_rank ON user_stats(rank)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_prizes_type ON prizes(prize_type)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_prizes_referral_code ON prizes(referral_code)')
 
             # Добавляем недостающие колонки для существующих баз данных
             await self._add_missing_columns(db)
+
+            # Инициализируем стандартные призы
+            await self._init_default_prizes(db)
 
             await db.commit()
             logger.info("База данных инициализирована")
@@ -210,6 +232,143 @@ class Database:
             except aiosqlite.OperationalError:
                 # Колонка уже существует
                 pass
+
+        # Поля для таблицы user_stats
+        user_stats_columns = [
+            ('referral_rank', 'TEXT')
+        ]
+
+        for column_name, column_type in user_stats_columns:
+            try:
+                await db.execute(f'ALTER TABLE user_stats ADD COLUMN {column_name} {column_type}')
+                logger.info(f"Колонка {column_name} добавлена в таблицу user_stats")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+    async def _init_default_prizes(self, db):
+        """Инициализация стандартных призов"""
+        import time
+        current_time = int(time.time())
+
+        # Проверяем, есть ли уже призы
+        cursor = await db.execute('SELECT COUNT(*) FROM prizes')
+        count = (await cursor.fetchone())[0]
+
+        if count > 0:
+            return  # Призы уже инициализированы
+
+        # Стандартные призы от главного модератора
+        default_prizes = [
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Бронзовая медаль",
+                description="За последовательность в достижении целей",
+                achievement_type="streak",
+                achievement_value=7,
+                emoji="🥉",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            ),
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Серебряная медаль",
+                description="За настойчивость и дисциплину",
+                achievement_type="streak",
+                achievement_value=14,
+                emoji="🥈",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            ),
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Золотая медаль",
+                description="За выдающуюся последовательность",
+                achievement_type="streak",
+                achievement_value=30,
+                emoji="🥇",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            ),
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Кристалл мотивации",
+                description="За активное участие в программе",
+                achievement_type="tasks",
+                achievement_value=50,
+                emoji="💎",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            ),
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Почетная грамота",
+                description="За достижение ранга специалиста",
+                achievement_type="rank",
+                achievement_value=4,  # Ранг C (индекс 3 в списке, но значение 4 для отображения)
+                emoji="🎖️",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            ),
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Специальный значок",
+                description="За достижение ранга профессионала",
+                achievement_type="rank",
+                achievement_value=5,  # Ранг B (индекс 4 в списке, но значение 5 для отображения)
+                emoji="🏅",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            ),
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Корона чемпиона",
+                description="За достижение ранга мастера",
+                achievement_type="rank",
+                achievement_value=6,  # Ранг A (индекс 5 в списке, но значение 6 для отображения)
+                emoji="👑",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            ),
+            Prize(
+                prize_type=PrizeType.ADMIN,
+                title="Звезда легенды",
+                description="За достижение высшего ранга",
+                achievement_type="rank",
+                achievement_value=7,  # Ранг S (индекс 6 в списке, но значение 7 для отображения)
+                emoji="🌟",
+                is_active=True,
+                created_at=current_time,
+                updated_at=current_time
+            )
+        ]
+
+        # Добавляем призы в базу данных
+        for prize in default_prizes:
+            await db.execute('''
+                INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, emoji, is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                prize.prize_type.value,
+                prize.referral_code,
+                prize.title,
+                prize.description,
+                prize.achievement_type,
+                prize.achievement_value,
+                prize.emoji,
+                prize.is_active,
+                prize.created_at,
+                prize.updated_at
+            ))
+
+        logger.info(f"Инициализировано {len(default_prizes)} стандартных призов")
 
     async def get_user(self, telegram_id: int) -> Optional[User]:
         """Получение пользователя по telegram_id"""
@@ -742,12 +901,13 @@ class Database:
         """Сохранение или обновление статистики пользователя"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
-                INSERT INTO user_stats (user_id, level, experience, rank, current_streak, best_streak, total_tasks_completed, last_task_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO user_stats (user_id, level, experience, rank, referral_rank, current_streak, best_streak, total_tasks_completed, last_task_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     level = excluded.level,
                     experience = excluded.experience,
                     rank = excluded.rank,
+                    referral_rank = excluded.referral_rank,
                     current_streak = excluded.current_streak,
                     best_streak = excluded.best_streak,
                     total_tasks_completed = excluded.total_tasks_completed,
@@ -757,6 +917,7 @@ class Database:
                 stats.level,
                 stats.experience,
                 stats.rank.value,
+                stats.referral_rank.value if stats.referral_rank else None,
                 stats.current_streak,
                 stats.best_streak,
                 stats.total_tasks_completed,
@@ -780,6 +941,7 @@ class Database:
                     level=row['level'],
                     experience=row['experience'],
                     rank=Rank(row['rank']),
+                    referral_rank=Rank(row['referral_rank']) if row['referral_rank'] else None,
                     current_streak=row['current_streak'],
                     best_streak=row['best_streak'],
                     total_tasks_completed=row['total_tasks_completed'],
@@ -816,3 +978,170 @@ class Database:
 
             rows = await cursor.fetchall()
             return [(row[0], row[1], row[2], row[3]) for row in rows]
+
+    async def get_top_users_by_referral_code(self, referral_code: str, limit: int = 10) -> list[tuple]:
+        """Получение топ пользователей среди подписчиков блогера (по реферальному коду)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT u.name, us.level, us.experience, us.referral_rank, u.city
+                FROM users u
+                JOIN user_stats us ON u.telegram_id = us.user_id
+                WHERE u.referral_code = ? AND u.subscription_active = TRUE
+                ORDER BY us.level DESC, us.experience DESC
+                LIMIT ?
+            ''', (referral_code, limit))
+
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
+
+    async def update_user_referral_rank(self, user_id: int):
+        """Обновление рейтинга среди подписчиков блогера для пользователя"""
+        # Получаем текущую статистику пользователя
+        user_stats = await self.get_user_stats(user_id)
+        if not user_stats:
+            return
+
+        # Получаем данные пользователя
+        user = await self.get_user(user_id)
+        if not user or not user.referral_code:
+            # Если нет реферального кода, очищаем referral_rank
+            user_stats.referral_rank = None
+            await self.save_user_stats(user_stats)
+            return
+
+        # Если есть реферальный код, referral_rank равен обычному rank
+        user_stats.referral_rank = user_stats.rank
+        await self.save_user_stats(user_stats)
+
+    # Методы для работы с призами
+
+    async def save_prize(self, prize: Prize) -> int:
+        """Сохранение или обновление приза"""
+        async with aiosqlite.connect(self.db_path) as db:
+            if prize.id is None:
+                # Создание нового приза
+                cursor = await db.execute('''
+                    INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, emoji, is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    prize.prize_type.value,
+                    prize.referral_code,
+                    prize.title,
+                    prize.description,
+                    prize.achievement_type,
+                    prize.achievement_value,
+                    prize.emoji,
+                    prize.is_active,
+                    prize.created_at,
+                    prize.updated_at
+                ))
+                prize.id = cursor.lastrowid
+            else:
+                # Обновление существующего приза
+                await db.execute('''
+                    UPDATE prizes SET
+                        prize_type = ?,
+                        referral_code = ?,
+                        title = ?,
+                        description = ?,
+                        achievement_type = ?,
+                        achievement_value = ?,
+                        emoji = ?,
+                        is_active = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                ''', (
+                    prize.prize_type.value,
+                    prize.referral_code,
+                    prize.title,
+                    prize.description,
+                    prize.achievement_type,
+                    prize.achievement_value,
+                    prize.emoji,
+                    prize.is_active,
+                    prize.updated_at,
+                    prize.id
+                ))
+            await db.commit()
+            logger.info(f"Приз '{prize.title}' сохранен (ID: {prize.id})")
+            return prize.id
+
+    async def get_prizes(self, prize_type: Optional[PrizeType] = None, referral_code: Optional[str] = None, is_active: bool = True) -> list[Prize]:
+        """Получение списка призов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            conditions = []
+            params = []
+
+            if prize_type is not None:
+                conditions.append("prize_type = ?")
+                params.append(prize_type.value)
+
+            if referral_code is not None:
+                conditions.append("referral_code = ?")
+                params.append(referral_code)
+
+            if is_active is not None:
+                conditions.append("is_active = ?")
+                params.append(is_active)
+
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+            cursor = await db.execute(f'''
+                SELECT * FROM prizes WHERE {where_clause}
+                ORDER BY created_at DESC
+            ''', params)
+
+            rows = await cursor.fetchall()
+            prizes = []
+
+            for row in rows:
+                prizes.append(Prize(
+                    id=row['id'],
+                    prize_type=PrizeType(row['prize_type']),
+                    referral_code=row['referral_code'],
+                    title=row['title'],
+                    description=row['description'],
+                    achievement_type=row['achievement_type'],
+                    achievement_value=row['achievement_value'],
+                    emoji=row['emoji'],
+                    is_active=row['is_active'],
+                    created_at=row['created_at'],
+                    updated_at=row['updated_at']
+                ))
+
+            return prizes
+
+    async def get_prize_by_id(self, prize_id: int) -> Optional[Prize]:
+        """Получение приза по ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM prizes WHERE id = ?', (prize_id,))
+
+            row = await cursor.fetchone()
+            if row:
+                return Prize(
+                    id=row['id'],
+                    prize_type=PrizeType(row['prize_type']),
+                    referral_code=row['referral_code'],
+                    title=row['title'],
+                    description=row['description'],
+                    achievement_type=row['achievement_type'],
+                    achievement_value=row['achievement_value'],
+                    emoji=row['emoji'],
+                    is_active=row['is_active'],
+                    created_at=row['created_at'],
+                    updated_at=row['updated_at']
+                )
+            return None
+
+    async def delete_prize(self, prize_id: int) -> bool:
+        """Удаление приза"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('DELETE FROM prizes WHERE id = ?', (prize_id,))
+            await db.commit()
+            deleted = cursor.rowcount > 0
+            if deleted:
+                logger.info(f"Приз с ID {prize_id} удален")
+            return deleted

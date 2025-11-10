@@ -3,6 +3,10 @@ from typing import Optional
 from datetime import date
 from enum import Enum
 
+class PrizeType(Enum):
+    ADMIN = "admin"        # призы от главного модератора
+    BLOGGER = "blogger"    # призы от блогера
+
 @dataclass
 class User:
     telegram_id: int
@@ -125,7 +129,22 @@ class UserStats:
     level: int = 1
     experience: int = 0
     rank: Rank = Rank.F
+    referral_rank: Optional[Rank] = None  # рейтинг среди подписчиков блогера (активен только если указан реферальный код)
     current_streak: int = 0  # дней подряд выполнения целей
     best_streak: int = 0     # лучший стрик
     total_tasks_completed: int = 0
     last_task_date: Optional[int] = None  # timestamp последнего выполненного задания
+
+@dataclass
+class Prize:
+    id: Optional[int] = None
+    prize_type: PrizeType = PrizeType.ADMIN  # тип приза: admin или blogger
+    referral_code: Optional[str] = None  # реферальный код блогера (только для blogger типа)
+    title: str = ""  # название приза
+    description: str = ""  # описание приза
+    achievement_type: str = ""  # тип достижения (streak, rank, level, tasks)
+    achievement_value: int = 0  # значение достижения
+    emoji: str = "🎁"  # эмодзи приза
+    is_active: bool = True  # активен ли приз
+    created_at: int = 0  # timestamp создания
+    updated_at: int = 0  # timestamp обновления
