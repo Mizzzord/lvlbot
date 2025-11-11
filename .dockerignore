@@ -60,11 +60,6 @@ docker-compose*.yml
 # Documentation
 overview.md
 
-# Scripts
-start-all.sh
-start-all.ps1
-deploy.sh
-
 # Examples and docs
 example.env
 env.example
