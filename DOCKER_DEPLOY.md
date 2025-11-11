@@ -4,8 +4,19 @@
 
 - Docker >= 20.10
 - Docker Compose >= 2.0
+- **Аккаунт на Docker Hub** (для избежания rate limit)
 - Минимум 2GB RAM
 - Минимум 5GB свободного места на диске
+
+## 🔑 Важно: Авторизация в Docker Hub
+
+**Перед развертыванием выполните авторизацию:**
+```bash
+docker login
+# Введите username и password от Docker Hub
+```
+
+Без авторизации вы можете столкнуться с rate limit ошибкой (100 pulls/6h для неавторизованных пользователей).
 
 ## 🔧 Быстрое развертывание
 
@@ -16,6 +27,17 @@ cd lvlbot
 
 # Копирование примера переменных окружения
 cp env.example .env
+```
+
+### 1.5. Подготовка образов (опционально, на локальном компьютере)
+```bash
+# На компьютере с авторизацией в Docker Hub выполните:
+./prepare-images.sh
+
+# Перенесите созданные .tar файлы на сервер
+# На сервере восстановите образы:
+docker load < motivation-node.tar
+docker load < motivation-python.tar
 ```
 
 ### 2. Настройка переменных окружения
@@ -156,6 +178,48 @@ docker stats
 - Docker логи: `docker-compose logs > logs.txt`
 
 ## 🚨 Устранение неполадок
+
+### Проблема: Docker Hub Rate Limit
+```bash
+ERROR: failed to build: failed to solve: node:18-bullseye-slim: failed to resolve source metadata for docker.io/library/node:18-bullseye-slim: failed to copy: httpReadSeeker: failed open: unexpected status code https://registry-1.docker.io/v2/library/node/manifests/sha256:...: 429 Too Many Requests - Server message: toomanyrequests: You have reached your unauthenticated pull rate limit.
+```
+
+**Решения:**
+1. **Авторизуйтесь в Docker Hub:**
+   ```bash
+   docker login
+   # Введите username и password
+   ```
+
+2. **Создайте аккаунт на Docker Hub** для увеличения лимита (200 pulls/6h вместо 100/6h)
+
+3. **Используйте Docker Hub mirror:**
+   ```bash
+   # В /etc/docker/daemon.json добавьте:
+   {
+     "registry-mirrors": ["https://mirror.gcr.io"]
+   }
+   # Перезапустите Docker: sudo systemctl restart docker
+   ```
+
+4. **Используйте VPN или другой IP** для сброса лимита
+
+5. **Подождите 6 часов** для автоматического сброса лимита
+
+6. **Альтернатива: Используйте локальные образы**
+   ```bash
+   # Скачайте образы заранее на другом компьютере:
+   docker pull node:18-bullseye-slim
+   docker pull python:3.11-slim
+
+   # Сохраните их:
+   docker save node:18-bullseye-slim > node.tar
+   docker save python:3.11-slim > python.tar
+
+   # Загрузите на сервер и восстановите:
+   docker load < node.tar
+   docker load < python.tar
+   ```
 
 ### Проблема: Ошибка сборки Node.js образа (canvas)
 ```bash
