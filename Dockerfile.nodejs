@@ -15,14 +15,13 @@ RUN apk add --no-cache \
 
 # Создание директории приложения
 WORKDIR /app
-
-RUN npm ci --only=production
 # Копирование package.json и установка зависимостей
 COPY package*.json ./
-
+RUN npm ci --only=production
 # Копирование исходного кода
 COPY card-generator.js server.js ./
 
+RUN apk del build-base g++ make python3 py3-setuptools cairo-dev jpeg-dev giflib-dev librsvg-dev pango-dev pixman-dev
 # Создание директорий для данных
 RUN mkdir -p player_cards player_photos temp_uploads
 
