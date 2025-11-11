@@ -31,6 +31,13 @@ async def wata_create_payment(
     Returns:
         tuple: (payment_id, payment_link) или None в случае ошибки
     """
+    # Проверяем токен
+    if WATA_TOKEN == "your_wata_bearer_token_here":
+        logger.error("[WATA] WATA_TOKEN не настроен! Используется значение по умолчанию.")
+        return None
+
+    logger.info(f"[WATA] Создание платежа для пользователя {user_mid}, сумма {money} ₽")
+
     # Создаем SSL-контекст с сертификатами certifi
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     connector = aiohttp.TCPConnector(ssl=ssl_context)
@@ -68,6 +75,9 @@ async def wata_create_payment(
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 response_text = await resp.text()
+                logger.info(f"[WATA] Request to {WATA_NEW_PAYMENT_LINK} with data: {json.dumps(payment_json, indent=2)}")
+                logger.info(f"[WATA] Response status: {resp.status}")
+                logger.info(f"[WATA] Response text: {response_text}")
 
                 if resp.ok:
                     payment_res = json.loads(response_text)

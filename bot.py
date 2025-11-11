@@ -898,6 +898,24 @@ async def process_referral(message: Message, state: FSMContext):
 
     if referral_code.lower() == "пропустить":
         referral_code = None
+    else:
+        # Проверяем существование реферального кода
+        if referral_code:
+            blogger = await db.get_blogger_by_referral_code(referral_code.upper())
+            if not blogger:
+                await message.answer(
+                    f"❌ Реферальный код '{referral_code}' не найден!\n\n"
+                    "Пожалуйста, проверьте правильность написания кода или нажмите 'Пропустить', "
+                    "если у вас нет реферального кода.",
+                    reply_markup=ReplyKeyboardMarkup(
+                        keyboard=[[KeyboardButton(text="Пропустить")]],
+                        resize_keyboard=True,
+                        one_time_keyboard=True
+                    )
+                )
+                return
+            # Код существует, продолжаем
+            referral_code = referral_code.upper()
 
     # Сохраняем реферальный код (или None)
     await state.update_data(referral_code=referral_code)
@@ -1134,6 +1152,7 @@ async def process_subscription_choice(callback: CallbackQuery, state: FSMContext
         await state.update_data(current_payment_id=payment_db_id)
 
     else:
+        logger.error(f"Не удалось создать платеж для пользователя {user_id}")
         await callback.message.edit_text(
             "❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.",
             reply_markup=None
@@ -1242,6 +1261,10 @@ async def process_player_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     logger.info(f"Получено фото от пользователя {user_id}")
 
+    # Проверяем, является ли это заменой фото
+    data = await state.get_data()
+    is_photo_change = data.get('is_photo_change', False)
+
     try:
         # Получаем самое большое фото
         photo = message.photo[-1]
@@ -1265,10 +1288,24 @@ async def process_player_photo(message: Message, state: FSMContext):
         user = await db.get_user(user_id)
         nickname = user.name if user and user.name else f"Player_{user_id}"
 
-        # Анализируем фото с помощью ИИ
-        await message.answer("🤖 Анализирую ваше фото и определяю характеристики...")
-
-        stats = await analyze_player_photo(photo_bytes)
+        if is_photo_change:
+            # Это замена фото - используем существующие характеристики
+            await message.answer("📸 Заменяю фото... Характеристики остаются прежними.")
+            existing_stats = await db.get_player_stats(user_id)
+            if existing_stats:
+                stats = {
+                    'strength': existing_stats.strength,
+                    'agility': existing_stats.agility,
+                    'endurance': existing_stats.endurance
+                }
+            else:
+                # Если статистики нет, анализируем заново
+                await message.answer("🤖 Анализирую ваше фото и определяю характеристики...")
+                stats = await analyze_player_photo(photo_bytes)
+        else:
+            # Это создание новой карточки - анализируем характеристики
+            await message.answer("🤖 Анализирую ваше фото и определяю характеристики...")
+            stats = await analyze_player_photo(photo_bytes)
 
         # Создаем изображение карточки игрока
         card_image_path = await create_player_card_image(
@@ -1284,39 +1321,73 @@ async def process_player_photo(message: Message, state: FSMContext):
             }
         )
 
-        # Создаем объект статов игрока
-        player_stats = PlayerStats(
-            user_id=user_id,
-            nickname=nickname,
-            experience=0,
-            strength=stats['strength'],
-            agility=stats['agility'],
-            endurance=stats['endurance'],
-            intelligence=50,  # базовое значение
-            charisma=50,      # базовое значение
-            photo_path=photo_path,
-            card_image_path=card_image_path,
-            created_at=int(datetime.datetime.now().timestamp()),
-            updated_at=int(datetime.datetime.now().timestamp())
-        )
+        if is_photo_change:
+            # Это замена фото - обновляем существующую запись
+            existing_stats = await db.get_player_stats(user_id)
+            if existing_stats:
+                # Обновляем только фото и карточку
+                existing_stats.photo_path = photo_path
+                existing_stats.card_image_path = card_image_path
+                existing_stats.updated_at = int(datetime.datetime.now().timestamp())
 
-        # Сохраняем статы в базу данных
-        await db.save_player_stats(player_stats)
+                # Сохраняем обновленные статы
+                await db.save_player_stats(existing_stats)
 
-        # Создаем начальную статистику пользователя
-        user_statistics = UserStats(
-            user_id=user_id,
-            level=1,
-            experience=0,
-            rank=Rank.F,
-            current_streak=0,
-            best_streak=0,
-            total_tasks_completed=0
-        )
-        await db.save_user_stats(user_statistics)
+                await message.answer("✅ Фото успешно заменено! Характеристики остались прежними.")
+            else:
+                # Если статистики нет, создаем заново (на всякий случай)
+                await message.answer("⚠️ Статистика не найдена, создаю новую карточку...")
 
-        # Обновляем рейтинг среди подписчиков блогера
-        await db.update_user_referral_rank(user_id)
+                player_stats = PlayerStats(
+                    user_id=user_id,
+                    nickname=nickname,
+                    experience=0,
+                    strength=stats['strength'],
+                    agility=stats['agility'],
+                    endurance=stats['endurance'],
+                    intelligence=50,
+                    charisma=50,
+                    photo_path=photo_path,
+                    card_image_path=card_image_path,
+                    created_at=int(datetime.datetime.now().timestamp()),
+                    updated_at=int(datetime.datetime.now().timestamp())
+                )
+                await db.save_player_stats(player_stats)
+        else:
+            # Это создание новой карточки
+            # Создаем объект статов игрока
+            player_stats = PlayerStats(
+                user_id=user_id,
+                nickname=nickname,
+                experience=0,
+                strength=stats['strength'],
+                agility=stats['agility'],
+                endurance=stats['endurance'],
+                intelligence=50,  # базовое значение
+                charisma=50,      # базовое значение
+                photo_path=photo_path,
+                card_image_path=card_image_path,
+                created_at=int(datetime.datetime.now().timestamp()),
+                updated_at=int(datetime.datetime.now().timestamp())
+            )
+
+            # Сохраняем статы в базу данных
+            await db.save_player_stats(player_stats)
+
+            # Создаем начальную статистику пользователя
+            user_statistics = UserStats(
+                user_id=user_id,
+                level=1,
+                experience=0,
+                rank=Rank.F,
+                current_streak=0,
+                best_streak=0,
+                total_tasks_completed=0
+            )
+            await db.save_user_stats(user_statistics)
+
+            # Обновляем рейтинг среди подписчиков блогера
+            await db.update_user_referral_rank(user_id)
 
         # Отправляем изображение карточки
         if card_image_path and os.path.exists(card_image_path):
@@ -1914,8 +1985,9 @@ async def handle_change_photo(callback: CallbackQuery, state: FSMContext):
         ])
     )
 
-    # Устанавливаем состояние для замены фото
+    # Устанавливаем состояние для замены фото и флаг замены
     await state.set_state(UserRegistration.waiting_for_player_photo)
+    await state.update_data(is_photo_change=True)
 
 @router.callback_query(lambda c: c.data == "payment_info")
 async def handle_payment_info(callback: CallbackQuery, state: FSMContext):

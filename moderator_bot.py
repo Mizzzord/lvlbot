@@ -128,7 +128,6 @@ def create_admin_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="👥 Статистика пользователей")],
         [KeyboardButton(text="📊 Общая статистика")],
         [KeyboardButton(text="🔍 Поиск пользователя")],
-        [KeyboardButton(text="📋 Активные подписки")],
         [KeyboardButton(text="🛡️ Управление модераторами"), KeyboardButton(text="📣 Управление блогерами")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -1640,6 +1639,7 @@ async def handle_search_another_user(callback: CallbackQuery, state: FSMContext)
     ]))
 
     await state.set_state(UserSearchStates.waiting_for_user_id)
+
 
 @dp.callback_query(lambda c: c.data.startswith("blogger_"))
 async def handle_blogger_callbacks(callback: CallbackQuery):
