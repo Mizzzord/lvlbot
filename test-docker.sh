@@ -142,11 +142,22 @@ fi
 # 7. Проверка портов
 echo ""
 echo "7️⃣  Проверка доступности портов..."
-if lsof -Pi :3000 -sTCP:LISTEN -t >/dev/null 2>&1 ; then
-    echo -e "${YELLOW}⚠️  Порт 3000 уже занят${NC}"
-    lsof -Pi :3000 -sTCP:LISTEN
+if command -v lsof &> /dev/null; then
+    if lsof -Pi :3000 -sTCP:LISTEN -t >/dev/null 2>&1 ; then
+        echo -e "${YELLOW}⚠️  Порт 3000 уже занят${NC}"
+        lsof -Pi :3000 -sTCP:LISTEN 2>/dev/null || echo "Не удалось получить детали процесса"
+    else
+        check "Порт 3000 свободен"
+    fi
+elif command -v netstat &> /dev/null; then
+    if netstat -tulpn 2>/dev/null | grep ":3000 " >/dev/null; then
+        echo -e "${YELLOW}⚠️  Порт 3000 уже занят${NC}"
+        netstat -tulpn 2>/dev/null | grep ":3000 "
+    else
+        check "Порт 3000 свободен"
+    fi
 else
-    check "Порт 3000 свободен"
+    echo -e "${YELLOW}⚠️  Невозможно проверить порты (нет lsof или netstat)${NC}"
 fi
 
 # 8. Тестовая сборка (опционально)

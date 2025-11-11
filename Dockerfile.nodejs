@@ -1,25 +1,29 @@
 # Dockerfile для Node.js сервиса генерации карточек
-FROM node:18-alpine
+FROM node:18-bullseye-slim
 
 # Установка системных зависимостей для Canvas
-# Разделяем на build-time и runtime зависимости
-RUN apk add --no-cache \
-    # Build dependencies
-    build-base \
-    g++ \
-    make \
+RUN apt-get update && apt-get install -y \
+    # Build dependencies для canvas
+    build-essential \
+    pkg-config \
     python3 \
-    py3-setuptools \
+    python3-dev \
     # Runtime dependencies для canvas
-    cairo \
-    jpeg \
-    giflib \
-    pango \
-    pixman \
+    libcairo2-dev \
+    libjpeg-dev \
+    libgif-dev \
+    librsvg2-dev \
+    libpango1.0-dev \
+    libpixman-1-dev \
     fontconfig \
-    font-noto \
-    font-noto-emoji \
-    && fc-cache -f
+    fonts-noto \
+    fonts-noto-emoji \
+    # Дополнительные runtime зависимости
+    libpangocairo-1.0-0 \
+    libgif7 \
+    libjpeg62-turbo \
+    libpng16-16 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Создание директории приложения
 WORKDIR /app
@@ -28,9 +32,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production
 
-# Удаляем только build зависимости, оставляя runtime
-RUN apk del build-base g++ make python3 py3-setuptools
-
 # Копирование исходного кода
 COPY card-generator.js server.js ./
 
@@ -38,8 +39,7 @@ COPY card-generator.js server.js ./
 RUN mkdir -p player_cards player_photos temp_uploads
 
 # Создание non-root пользователя для безопасности
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001 && \
+RUN useradd -m -u 1001 -s /bin/bash nodejs && \
     chown -R nodejs:nodejs /app
 
 USER nodejs
