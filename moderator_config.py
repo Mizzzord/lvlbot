@@ -7,6 +7,7 @@ MODERATOR_BOT_TOKEN = "8492503824:AAHfPiydZ4rvOB4RSmHqfD_Ke9NbO3Jqat0"
 ADMIN_TELEGRAM_IDS = [
     # Замените на реальные Telegram ID главного(главных) модератора(ов)
     743054320,
+    5195280676,
     
 ]
 

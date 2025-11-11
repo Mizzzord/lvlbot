@@ -1,9 +1,9 @@
-const sharp = require('sharp');
+const { createCanvas, loadImage, registerFont } = require('canvas');
 const fs = require('fs');
 const path = require('path');
 
 /**
- * Создает изображение карточки игрока с помощью Sharp
+ * Создает изображение карточки игрока с помощью Canvas API
  * @param {string} photoPath - путь к фото пользователя
  * @param {string} nickname - ник игрока
  * @param {number} experience - опыт игрока
@@ -12,213 +12,261 @@ const path = require('path');
  */
 async function createPlayerCardImage(photoPath, nickname, experience, stats) {
     try {
-        console.log(`Создание карточки для ${nickname} с помощью Sharp...`);
+        console.log(`Создание карточки для ${nickname} с помощью Canvas...`);
 
         // Размеры карточки
         const width = 800;
         const height = 1200;
 
-        // Создаем большой SVG со всей карточкой
-        const svgContent = `
-        <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
-            <!-- Градиентный фон -->
-            <defs>
-                <linearGradient id="bgGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1" />
-                    <stop offset="50%" style="stop-color:#16213e;stop-opacity:1" />
-                    <stop offset="100%" style="stop-color:#0f3460;stop-opacity:1" />
-                </linearGradient>
-                
-                <linearGradient id="goldGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" style="stop-color:#FFD700;stop-opacity:1" />
-                    <stop offset="50%" style="stop-color:#FFA500;stop-opacity:1" />
-                    <stop offset="100%" style="stop-color:#FFD700;stop-opacity:1" />
-                </linearGradient>
+        // Создаем Canvas
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
 
-                <radialGradient id="glowGradient" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" style="stop-color:#4A90E2;stop-opacity:0.3" />
-                    <stop offset="100%" style="stop-color:#4A90E2;stop-opacity:0" />
-                </radialGradient>
+        // Градиентный фон
+        const bgGradient = ctx.createLinearGradient(0, 0, 0, height);
+        bgGradient.addColorStop(0, '#1a1a2e');
+        bgGradient.addColorStop(0.5, '#16213e');
+        bgGradient.addColorStop(1, '#0f3460');
 
-                <!-- Фильтр свечения -->
-                <filter id="glow">
-                    <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-                    <feMerge>
-                        <feMergeNode in="coloredBlur"/>
-                        <feMergeNode in="SourceGraphic"/>
-                    </feMerge>
-                </filter>
-            </defs>
+        ctx.fillStyle = bgGradient;
+        ctx.fillRect(0, 0, width, height);
 
-            <!-- Фоновый градиент -->
-            <rect width="${width}" height="${height}" fill="url(#bgGradient)"/>
+        // Декоративный круг свечения вверху
+        const glowGradient = ctx.createRadialGradient(width/2, 100, 0, width/2, 100, 200);
+        glowGradient.addColorStop(0, 'rgba(74, 144, 226, 0.3)');
+        glowGradient.addColorStop(1, 'rgba(74, 144, 226, 0)');
 
-            <!-- Декоративный круг свечения вверху -->
-            <circle cx="${width/2}" cy="100" r="200" fill="url(#glowGradient)"/>
+        ctx.fillStyle = glowGradient;
+        ctx.beginPath();
+        ctx.arc(width/2, 100, 200, 0, Math.PI * 2);
+        ctx.fill();
 
-            <!-- Внешняя рамка с градиентом -->
-            <rect x="15" y="15" width="${width-30}" height="${height-30}"
-                  fill="none" stroke="url(#goldGradient)" stroke-width="3" rx="20"/>
-            
-            <!-- Внутренняя рамка -->
-            <rect x="20" y="20" width="${width-40}" height="${height-40}"
-                  fill="none" stroke="#4A90E2" stroke-width="2" rx="18" opacity="0.5"/>
+        // Внешняя рамка с градиентом
+        const goldGradient = ctx.createLinearGradient(0, 0, width, 0);
+        goldGradient.addColorStop(0, '#FFD700');
+        goldGradient.addColorStop(0.5, '#FFA500');
+        goldGradient.addColorStop(1, '#FFD700');
 
-            <!-- Заголовок с тенью -->
-            <text x="${width/2}" y="70" font-family="Arial, sans-serif"
-                  font-size="42" font-weight="bold" fill="#FFD700"
-                  text-anchor="middle" filter="url(#glow)">ИГРОВАЯ КАРТОЧКА</text>
+        ctx.strokeStyle = goldGradient;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.roundRect(15, 15, width-30, height-30, 20);
+        ctx.stroke();
 
-            <!-- Декоративная линия под заголовком -->
-            <line x1="${width/2 - 150}" y1="85" x2="${width/2 + 150}" y2="85" 
-                  stroke="url(#goldGradient)" stroke-width="2"/>
+        // Внутренняя рамка
+        ctx.strokeStyle = '#4A90E2';
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.roundRect(20, 20, width-40, height-40, 18);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
 
-            <!-- Ник игрока с подсветкой -->
-            <text x="${width/2}" y="140" font-family="Arial, sans-serif"
-                  font-size="32" font-weight="bold" fill="url(#goldGradient)"
-                  text-anchor="middle" filter="url(#glow)">${nickname || 'Игрок'}</text>
+        // Настройки шрифта
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
 
-            <!-- Опыт в красивой рамке -->
-            <rect x="${width/2 - 80}" y="155" width="160" height="35" 
-                  fill="#0f3460" stroke="#4A90E2" stroke-width="2" rx="17.5"/>
-            <text x="${width/2}" y="180" font-family="Arial, sans-serif"
-                  font-size="16" font-weight="bold" fill="#FFD700"
-                  text-anchor="middle">⭐ Опыт: ${experience || 0}</text>
+        // Заголовок
+        ctx.fillStyle = '#FFD700';
+        ctx.font = 'bold 42px Arial, sans-serif';
+        ctx.fillText('ИГРОВАЯ КАРТОЧКА', width/2, 70);
 
-            <!-- Фото placeholder с красивой рамкой -->
-            ${!photoPath || !fs.existsSync(photoPath) ? `
-            <circle cx="${width/2}" cy="310" r="85" fill="#0f3460" stroke="url(#goldGradient)" stroke-width="3"/>
-            <circle cx="${width/2}" cy="310" r="75" fill="#1a1a2e"/>
-            <text x="${width/2}" y="325" font-family="Arial, sans-serif"
-                  font-size="60" fill="#FFD700" text-anchor="middle">👤</text>
-            ` : `
-            <circle cx="${width/2}" cy="310" r="85" fill="none" stroke="url(#goldGradient)" stroke-width="3"/>
-            `}
+        // Декоративная линия под заголовком
+        ctx.strokeStyle = goldGradient;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(width/2 - 150, 85);
+        ctx.lineTo(width/2 + 150, 85);
+        ctx.stroke();
 
-            <!-- Заголовок секции характеристик -->
-            <text x="${width/2}" y="440" font-family="Arial, sans-serif"
-                  font-size="24" font-weight="bold" fill="#4A90E2"
-                  text-anchor="middle">ХАРАКТЕРИСТИКИ</text>
-            
-            <line x1="100" y1="455" x2="${width - 100}" y2="455" 
-                  stroke="#4A90E2" stroke-width="1" opacity="0.5"/>
+        // Ник игрока
+        ctx.fillStyle = goldGradient;
+        ctx.font = 'bold 32px Arial, sans-serif';
+        ctx.fillText(nickname || 'Игрок', width/2, 140);
 
-            <!-- Характеристики -->
-            ${(() => {
+        // Опыт в рамке
+        ctx.fillStyle = '#0f3460';
+        ctx.strokeStyle = '#4A90E2';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(width/2 - 80, 155, 160, 35, 17.5);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#FFD700';
+        ctx.font = 'bold 16px Arial, sans-serif';
+        ctx.fillText(`⭐ Опыт: ${experience || 0}`, width/2, 172.5);
+
+        // Заголовок характеристик
+        ctx.fillStyle = '#4A90E2';
+        ctx.font = 'bold 24px Arial, sans-serif';
+        ctx.fillText('ХАРАКТЕРИСТИКИ', width/2, 440);
+
+        // Линия под заголовком характеристик
+        ctx.strokeStyle = '#4A90E2';
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(100, 455);
+        ctx.lineTo(width - 100, 455);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        // Характеристики
                 const statNames = {
-                    strength: { name: 'Сила', icon: '💪', color: '#FF6B6B' },
-                    agility: { name: 'Ловкость', icon: '⚡', color: '#4ECDC4' },
-                    endurance: { name: 'Выносливость', icon: '🛡️', color: '#45B7D1' },
-                    intelligence: { name: 'Интеллект', icon: '🧠', color: '#A06CD5' },
-                    charisma: { name: 'Харизма', icon: '✨', color: '#FFD93D' }
-                };
+            strength: { name: '💪 Сила', color: '#FF6B6B' },
+            agility: { name: '⚡ Ловкость', color: '#4ECDC4' },
+            endurance: { name: '🛡️ Выносливость', color: '#45B7D1' },
+            intelligence: { name: '🧠 Интеллект', color: '#A06CD5' },
+            charisma: { name: '✨ Харизма', color: '#FFD93D' }
+        };
 
-                let result = '';
                 let currentY = 490;
+        const barWidth = width - 240;
+        const barHeight = 12;
 
                 for (const [key, info] of Object.entries(statNames)) {
                     const value = stats[key] || 50;
                     const percentage = Math.min(value, 100);
 
-                    // Фон для каждой характеристики
-                    result += `<rect x="60" y="${currentY}" width="${width - 120}" height="55"
-                          fill="#0f3460" rx="10" opacity="0.5"/>`;
+            // Фон для характеристики
+            ctx.fillStyle = 'rgba(15, 52, 96, 0.5)';
+            ctx.beginPath();
+            ctx.roundRect(60, currentY, width - 120, 55, 10);
+            ctx.fill();
 
-                    // Иконка
-                    result += `<text x="80" y="${currentY + 33}" font-family="Arial, sans-serif"
-                          font-size="24">${info.icon}</text>`;
+            // Название характеристики
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = 'bold 18px Arial, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(info.name, 120, currentY + 25);
 
-                    // Название
-                    result += `<text x="120" y="${currentY + 25}" font-family="Arial, sans-serif"
-                          font-size="18" font-weight="bold" fill="#FFFFFF">${info.name}</text>`;
-                    
-                    // Значение
-                    result += `<text x="${width - 100}" y="${currentY + 25}" font-family="Arial, sans-serif"
-                          font-size="18" font-weight="bold" fill="${info.color}">${value}</text>`;
+            // Значение характеристики
+            ctx.fillStyle = info.color;
+            ctx.font = 'bold 18px Arial, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(value.toString(), width - 100, currentY + 25);
 
-                    // Полоса прогресса с градиентом
-                    const barWidth = width - 240;
-                    const barHeight = 12;
+            // Полоса прогресса - фон
+            ctx.fillStyle = '#1a1a2e';
+            ctx.strokeStyle = '#4A90E2';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(120, currentY + 35, barWidth, barHeight, 6);
+            ctx.fill();
+            ctx.stroke();
+
+            // Полоса прогресса - заполнение
                     const progressWidth = (barWidth * percentage) / 100;
-                    const barX = 120;
+            const gradient = ctx.createLinearGradient(120, 0, 120 + progressWidth, 0);
+            gradient.addColorStop(0, info.color + 'CC'); // с прозрачностью
+            gradient.addColorStop(1, info.color);
 
-                    // Фон полосы
-                    result += `<rect x="${barX}" y="${currentY + 35}" width="${barWidth}" height="${barHeight}"
-                          fill="#1a1a2e" stroke="#4A90E2" stroke-width="1" rx="6"/>`;
-                    
-                    // Прогресс
-                    result += `<defs>
-                        <linearGradient id="statGradient${key}" x1="0%" y1="0%" x2="100%" y2="0%">
-                            <stop offset="0%" style="stop-color:${info.color};stop-opacity:0.8" />
-                            <stop offset="100%" style="stop-color:${info.color};stop-opacity:1" />
-                        </linearGradient>
-                    </defs>`;
-                    
-                    result += `<rect x="${barX}" y="${currentY + 35}" width="${progressWidth}" height="${barHeight}"
-                          fill="url(#statGradient${key})" rx="6"/>`;
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.roundRect(120 + 1, currentY + 36, progressWidth - 2, barHeight - 2, 5);
+            ctx.fill();
                     
                     // Процентная отметка
-                    result += `<text x="${barX + progressWidth - 25}" y="${currentY + 44}" 
-                          font-family="Arial, sans-serif"
-                          font-size="10" fill="#FFFFFF" font-weight="bold">${value}%</text>`;
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = 'bold 10px Arial, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(`${value}%`, 120 + progressWidth - 5, currentY + 41);
 
                     currentY += 70;
                 }
 
-                return result;
-            })()}
+        // Декоративный элемент внизу
+        ctx.strokeStyle = goldGradient;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(100, height - 80);
+        ctx.lineTo(width - 100, height - 80);
+        ctx.stroke();
 
-            <!-- Декоративный элемент внизу -->
-            <rect x="100" y="${height - 80}" width="${width - 200}" height="2"
-                  fill="url(#goldGradient)"/>
-            
-            <!-- Нижний текст с иконкой -->
-            <text x="${width/2}" y="${height - 50}" font-family="Arial, sans-serif"
-                  font-size="16" fill="#4A90E2" font-weight="bold"
-                  text-anchor="middle">🎮 @motivation_lvl_bot</text>
-            
-            <text x="${width/2}" y="${height - 25}" font-family="Arial, sans-serif"
-                  font-size="12" fill="#AAAAAA"
-                  text-anchor="middle">Твой путь к цели начинается здесь</text>
-        </svg>`;
+        // Нижний текст
+        ctx.fillStyle = '#4A90E2';
+        ctx.font = 'bold 16px Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('🎮 @motivation_lvl_bot', width/2, height - 50);
 
-        // Создаем изображение из SVG
-        let image = sharp(Buffer.from(svgContent)).png();
+        ctx.fillStyle = '#AAAAAA';
+        ctx.font = '12px Arial, sans-serif';
+        ctx.fillText('Твой путь к цели начинается здесь', width/2, height - 25);
 
         // Добавляем фото, если оно есть
         if (photoPath && fs.existsSync(photoPath)) {
             try {
-                const photoBuffer = fs.readFileSync(photoPath);
-                
-                // Создаем круглое фото с обрезкой
-                const resizedPhoto = await sharp(photoBuffer)
-                    .resize(150, 150, { fit: 'cover', position: 'center' })
-                    .composite([{
-                        input: Buffer.from(`
-                            <svg width="150" height="150">
-                                <circle cx="75" cy="75" r="75" fill="white"/>
-                            </svg>
-                        `),
-                        blend: 'dest-in'
-                    }])
-                    .png()
-                    .toBuffer();
+                const photo = await loadImage(photoPath);
 
-                // Компонуем фото на изображение (центрируем в круге)
-                image = image.composite([{
-                    input: resizedPhoto,
-                    top: 235,  // 310 - 75 (радиус фото)
-                    left: (width - 150) / 2
-                }]);
+                // Создаем круглое фото
+                const avatarSize = 150;
+                const avatarX = (width - avatarSize) / 2;
+                const avatarY = 235;
+
+                // Сохраняем текущий контекст
+                ctx.save();
+
+                // Создаем круглую маску
+                ctx.beginPath();
+                ctx.arc(avatarX + avatarSize/2, avatarY + avatarSize/2, avatarSize/2, 0, Math.PI * 2);
+                ctx.clip();
+
+                // Вычисляем размеры для обрезки
+                const scale = Math.max(avatarSize / photo.width, avatarSize / photo.height);
+                const scaledWidth = photo.width * scale;
+                const scaledHeight = photo.height * scale;
+                const offsetX = (avatarSize - scaledWidth) / 2;
+                const offsetY = (avatarSize - scaledHeight) / 2;
+
+                // Рисуем фото
+                ctx.drawImage(photo, avatarX + offsetX, avatarY + offsetY, scaledWidth, scaledHeight);
+
+                // Восстанавливаем контекст
+                ctx.restore();
+
+                // Рисуем рамку вокруг аватара
+                ctx.strokeStyle = goldGradient;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(avatarX + avatarSize/2, avatarY + avatarSize/2, avatarSize/2, 0, Math.PI * 2);
+                ctx.stroke();
+
             } catch (photoError) {
                 console.warn(`Не удалось обработать фото: ${photoError.message}`);
+                // Рисуем placeholder
+                ctx.fillStyle = '#0f3460';
+                ctx.strokeStyle = goldGradient;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(width/2, 310, 75, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#FFD700';
+                ctx.font = '60px Arial, sans-serif';
+                ctx.fillText('👤', width/2, 310);
             }
+        } else {
+            // Рисуем placeholder для аватара
+            ctx.fillStyle = '#0f3460';
+            ctx.strokeStyle = goldGradient;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(width/2, 310, 75, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#FFD700';
+            ctx.font = '60px Arial, sans-serif';
+            ctx.fillText('👤', width/2, 310);
         }
 
-        const result = await image.toBuffer();
+        // Получаем буфер изображения
+        const buffer = canvas.toBuffer('image/png');
 
-        console.log(`Карточка игрока создана для: ${nickname}, размер: ${result.length} байт`);
-        return result;
+        console.log(`Карточка игрока создана для: ${nickname}, размер: ${buffer.length} байт`);
+        return buffer;
 
     } catch (error) {
         console.error(`Ошибка создания карточки игрока: ${error.message}`);
