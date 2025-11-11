@@ -62,35 +62,32 @@ async def get_user_role(telegram_id: int) -> Optional[str]:
     """Определение роли пользователя по Telegram ID"""
     # Проверяем админов
     admin_ids = await db.get_admin_telegram_ids()
+    logger.info(f"Проверка роли для {telegram_id}: админы = {admin_ids}")
     if telegram_id in admin_ids:
+        logger.info(f"Пользователь {telegram_id} определен как ADMIN")
         return ModeratorRole.ADMIN
 
     # Проверяем блогеров
     blogger_ids = await db.get_blogger_telegram_ids()
+    logger.info(f"Проверка роли для {telegram_id}: блогеры = {blogger_ids}")
     if telegram_id in blogger_ids:
+        logger.info(f"Пользователь {telegram_id} определен как BLOGGER")
         return ModeratorRole.BLOGGER
 
     # Проверяем модераторов
     moderator_ids = await db.get_moderator_telegram_ids()
+    logger.info(f"Проверка роли для {telegram_id}: модераторы = {moderator_ids}")
     if telegram_id in moderator_ids:
+        logger.info(f"Пользователь {telegram_id} определен как MODERATOR")
         return ModeratorRole.MODERATOR
 
+    logger.info(f"Пользователь {telegram_id} не имеет роли")
     return None
 
 async def is_authorized(telegram_id: int) -> bool:
     """Проверка авторизации пользователя"""
     role = await get_user_role(telegram_id)
     return role is not None
-
-class PrizeManagementStates(StatesGroup):
-    waiting_for_prize_type = State()
-    waiting_for_referral_code = State()
-    waiting_for_prize_title = State()
-    waiting_for_prize_description = State()
-    waiting_for_achievement_type = State()
-    waiting_for_achievement_value = State()
-    waiting_for_prize_emoji = State()
-    confirming_prize = State()
 
 class ModeratorManagementStates(StatesGroup):
     waiting_for_moderator_telegram_id = State()
@@ -113,6 +110,13 @@ class PrizeManagementStates(StatesGroup):
     waiting_for_prize_emoji = State()
     confirming_prize = State()
     waiting_for_prize_id_to_delete = State()
+    # Состояния для редактирования призов
+    editing_prize_title = State()
+    editing_prize_description = State()
+    editing_achievement_type = State()
+    editing_achievement_value = State()
+    editing_prize_emoji = State()
+    confirming_prize_edit = State()
 
 def create_admin_keyboard() -> ReplyKeyboardMarkup:
     """Создание клавиатуры для главного модератора"""
@@ -129,10 +133,10 @@ def create_admin_keyboard() -> ReplyKeyboardMarkup:
 def create_blogger_keyboard() -> ReplyKeyboardMarkup:
     """Создание клавиатуры для блогера"""
     keyboard = [
-        [KeyboardButton(text="🎁 Мои призы")],
-        [KeyboardButton(text="➕ Добавить приз")],
+        [KeyboardButton(text="🎁 Управление призами")],
         [KeyboardButton(text="📊 Статистика подписчиков")],
-        [KeyboardButton(text="👤 Найти подписчика")]
+        [KeyboardButton(text="🏆 Рейтинг подписчиков")],
+        [KeyboardButton(text="🔗 Мой реферальный код")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -721,6 +725,60 @@ async def handle_admin_bloggers(message: Message):
 
     await message.answer(text, reply_markup=keyboard)
 
+# Обработчики для блогеров
+
+@dp.message(F.text == "🎁 Управление призами")
+async def handle_blogger_prizes(message: Message):
+    """Управление призами блогера"""
+    user_id = message.from_user.id
+    logger.info(f"=== Вызвана функция handle_blogger_prizes для пользователя {user_id} ===")
+    logger.info(f"Текст сообщения: '{message.text}'")
+
+    role = await get_user_role(user_id)
+    logger.info(f"Роль пользователя {user_id}: {role}")
+
+    if role != ModeratorRole.BLOGGER:
+        logger.warning(f"Пользователь {user_id} с ролью {role} попытался получить доступ к функциям блогера")
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    # Получаем реферальный код блогера
+    logger.info(f"Получаем данные блогера для пользователя {user_id}")
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    logger.info(f"Результат get_blogger_by_telegram_id для {user_id}: {blogger}")
+
+    if not blogger:
+        logger.error(f"Блогер {user_id} не найден в базе данных")
+        await message.answer("❌ Вы не зарегистрированы как блогер.")
+        return
+
+    referral_code = blogger['referral_code']
+
+    # Получаем призы блогера
+    blogger_prizes = await db.get_prizes(referral_code=referral_code, is_active=True)
+
+    text = "🎁 <b>Управление вашими призами</b>\n\n"
+
+    if blogger_prizes:
+        text += f"📊 <b>Найдено призов:</b> {len(blogger_prizes)}\n\n"
+        for prize in blogger_prizes:
+            text += f"{prize.emoji} <b>{prize.title}</b>\n"
+            if prize.description:
+                text += f"   └ {prize.description}\n"
+            text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
+            text += f"   └ ID: {prize.id}\n\n"
+    else:
+        text += "У вас пока нет созданных призов.\nИспользуйте кнопку '➕ Создать приз' для создания первого приза."
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать приз", callback_data="create_blogger_prize")],
+        [InlineKeyboardButton(text="✏️ Редактировать призы", callback_data="edit_blogger_prize")],
+        [InlineKeyboardButton(text="🗑️ Удалить приз", callback_data="delete_blogger_prize")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_blogger_menu")]
+    ])
+
+    await message.answer(text, reply_markup=keyboard)
+
 # Обработчики для главного модератора
 
 @dp.message(F.text == "🎁 Управление призами")
@@ -814,44 +872,7 @@ async def handle_admin_general_stats(message: Message):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
     ]))
 
-# Обработчики для блогеров
-
-@dp.message(F.text == "🎁 Мои призы")
-async def handle_blogger_prizes(message: Message):
-    """Призы блогера"""
-    user_id = message.from_user.id
-    role = await get_user_role(user_id)
-
-    if role != ModeratorRole.BLOGGER:
-        await message.answer("❌ У вас нет доступа к этой функции.")
-        return
-
-    # Находим реферальный код блогера (предполагаем, что он совпадает с каким-то полем)
-    # Для простоты будем использовать user_id как реферальный код, но в реальности
-    # нужно добавить поле referral_code для блогеров в базу данных
-
-    # Пока что покажем все призы блогеров
-    blogger_prizes = await db.get_prizes(prize_type=PrizeType.BLOGGER, is_active=True)
-
-    text = "🎁 <b>Ваши призы</b>\n\n"
-
-    if blogger_prizes:
-        for prize in blogger_prizes:
-            text += f"{prize.emoji} <b>{prize.title}</b>\n"
-            if prize.description:
-                text += f"   └ {prize.description}\n"
-            text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
-            text += f"   └ ID: {prize.id}\n\n"
-    else:
-        text += "У вас пока нет созданных призов.\nИспользуйте кнопку '➕ Добавить приз' для создания."
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить приз", callback_data="add_blogger_prize")],
-        [InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_blogger_prize")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_blogger_menu")]
-    ])
-
-    await message.answer(text, reply_markup=keyboard)
+# Обработчики для блогеров объявлены выше
 
 @dp.message(F.text == "📊 Статистика подписчиков")
 async def handle_blogger_stats(message: Message):
@@ -863,28 +884,600 @@ async def handle_blogger_stats(message: Message):
         await message.answer("❌ У вас нет доступа к этой функции.")
         return
 
-    # Получаем реферальный код блогера (нужно будет добавить логику определения)
-    referral_code = str(user_id)  # Временное решение
+    # Получаем статистику блогера
+    stats = await db.get_blogger_stats(user_id)
 
-    # Получаем статистику подписчиков
-    subscribers = await db.get_users_by_referral_code_stats(referral_code)
-    total_subscribers = len(subscribers)
+    if 'error' in stats:
+        await message.answer(f"❌ {stats['error']}")
+        return
 
     text = "📊 <b>Статистика ваших подписчиков</b>\n\n"
-    text += f"👥 <b>Всего подписчиков:</b> {total_subscribers}\n\n"
+    text += f"🔗 <b>Реферальный код:</b> <code>{stats['referral_code']}</code>\n\n"
+    text += f"👥 <b>Всего подписчиков:</b> {stats['total_subscribers']}\n"
+    text += f"✅ <b>Активных (с подпиской):</b> {stats['active_subscribers']}\n"
+    text += f"⏸️ <b>Неактивных:</b> {stats['inactive_subscribers']}\n\n"
+    text += f"📈 <b>Заданий выполнено подписчиками:</b> {stats['total_tasks_completed']}\n\n"
 
-    if subscribers:
-        # Показываем топ подписчиков
-        text += "🏆 <b>Топ подписчиков:</b>\n"
-        for i, (name, level, exp, rank) in enumerate(subscribers[:10], 1):
-            text += f"{i}. {name} - Ур.{level} ({rank})\n"
+    if stats['total_subscribers'] > 0:
+        active_percentage = (stats['active_subscribers'] / stats['total_subscribers']) * 100
+        text += f"📊 <b>Активность:</b> {active_percentage:.1f}% подписчиков имеют активную подписку"
+    else:
+        text += "💡 Поделитесь вашим реферальным кодом, чтобы привлечь первых подписчиков!"
+
+    await message.answer(text, reply_markup=create_blogger_keyboard())
+
+@dp.message(F.text == "🏆 Рейтинг подписчиков")
+async def handle_blogger_ranking(message: Message):
+    """Рейтинг топ-10 подписчиков блогера"""
+    user_id = message.from_user.id
+    role = await get_user_role(user_id)
+
+    if role != ModeratorRole.BLOGGER:
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    # Получаем топ подписчиков блогера
+    top_subscribers = await db.get_blogger_top_subscribers(user_id, limit=10)
+
+    text = "🏆 <b>Рейтинг ваших подписчиков</b>\n\n"
+
+    if top_subscribers:
+        text += f"📊 <b>Топ {len(top_subscribers)} подписчиков по опыту:</b>\n\n"
+
+        for i, subscriber in enumerate(top_subscribers, 1):
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+            text += f"{medal} <b>{subscriber['display_name']}</b>\n"
+            text += f"   🆔 ID: <code>{subscriber['telegram_id']}</code>\n"
+            text += f"   ⭐ Опыт: {subscriber['experience']}\n"
+            text += f"   📊 Уровень: {subscriber['level']}\n"
+            text += f"   ✅ Заданий: {subscriber['tasks_completed']}\n\n"
+    else:
+        text += "👥 У вас пока нет подписчиков с выполненными заданиями.\n\n"
+        text += "💡 Поделитесь вашим реферальным кодом, чтобы подписчики начали выполнять задания!"
+
+    # Получаем реферальный код для отображения внизу
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if blogger:
+        text += f"🔗 <b>Ваш реферальный код:</b> <code>{blogger['referral_code']}</code>\n"
+        text += "📋 <i>Скопируйте код выше, чтобы поделиться им</i>"
+
+    await message.answer(text, reply_markup=create_blogger_keyboard())
+
+@dp.message(F.text == "🔗 Мой реферальный код")
+async def handle_blogger_referral_code(message: Message):
+    """Показать реферальный код блогера"""
+    user_id = message.from_user.id
+    role = await get_user_role(user_id)
+
+    if role != ModeratorRole.BLOGGER:
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    # Получаем данные блогера
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if not blogger:
+        await message.answer("❌ Вы не зарегистрированы как блогер.")
+        return
+
+    referral_code = blogger['referral_code']
+
+    text = "🔗 <b>Ваш реферальный код</b>\n\n"
+    text += f"📋 <b>Код для подписчиков:</b>\n"
+    text += f"<code>{referral_code}</code>\n\n"
+    text += "📱 <b>Как использовать:</b>\n"
+    text += "1. Скопируйте код выше\n"
+    text += "2. Поделитесь им со своей аудиторией\n"
+    text += "3. Ваши подписчики введут этот код в боте\n"
+    text += "4. Вы будете получать статистику их активности\n\n"
+    text += "🎁 <b>Преимущества для ваших подписчиков:</b>\n"
+    text += "• Доступ к специальным призам от вас\n"
+    text += "• Возможность соревноваться в вашем рейтинге\n"
+    text += "• Отслеживание прогресса в вашем сообществе"
+
+    await message.answer(text, reply_markup=create_blogger_keyboard())
+
+# Обработчики для управления призами блогера
+
+@dp.callback_query(lambda c: c.data == "create_blogger_prize")
+async def handle_create_blogger_prize(callback: CallbackQuery, state: FSMContext):
+    """Создание нового приза блогером"""
+    await callback.answer()
+
+    user_id = callback.from_user.id
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if not blogger:
+        await callback.message.edit_text("❌ Вы не зарегистрированы как блогер.")
+        return
+
+    # Начинаем процесс создания приза
+    text = "🎁 <b>Создание нового приза</b>\n\n"
+    text += "Введите название приза:"
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_blogger_prize")]
+    ]))
+
+    # Сохраняем информацию о блогере в состоянии
+    await state.update_data(
+        blogger_referral_code=blogger['referral_code'],
+        prize_type='blogger'
+    )
+    await state.set_state(PrizeManagementStates.waiting_for_prize_title)
+
+@dp.callback_query(lambda c: c.data == "edit_blogger_prize")
+async def handle_edit_blogger_prize(callback: CallbackQuery):
+    """Редактирование призов блогера"""
+    await callback.answer()
+
+    user_id = callback.from_user.id
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if not blogger:
+        await callback.message.edit_text("❌ Вы не зарегистрированы как блогер.")
+        return
+
+    prizes = await db.get_prizes(referral_code=blogger['referral_code'], is_active=True)
+
+    if not prizes:
+        await callback.message.edit_text(
+            "❌ У вас нет призов для редактирования.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_blogger_menu")]
+            ])
+        )
+        return
+
+    text = "✏️ <b>Выберите приз для редактирования:</b>\n\n"
+
+    keyboard = []
+    for prize in prizes:
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{prize.emoji} {prize.title}",
+                callback_data=f"edit_prize_{prize.id}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_blogger_prize")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+
+@dp.callback_query(lambda c: c.data == "delete_blogger_prize")
+async def handle_delete_blogger_prize(callback: CallbackQuery):
+    """Удаление приза блогера"""
+    await callback.answer()
+
+    user_id = callback.from_user.id
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if not blogger:
+        await callback.message.edit_text("❌ Вы не зарегистрированы как блогер.")
+        return
+
+    prizes = await db.get_prizes(referral_code=blogger['referral_code'], is_active=True)
+
+    if not prizes:
+        await callback.message.edit_text(
+            "❌ У вас нет призов для удаления.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_blogger_menu")]
+            ])
+        )
+        return
+
+    text = "🗑️ <b>Выберите приз для удаления:</b>\n\n"
+
+    keyboard = []
+    for prize in prizes:
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{prize.emoji} {prize.title}",
+                callback_data=f"delete_prize_{prize.id}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_blogger_prize")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+
+@dp.callback_query(lambda c: c.data.startswith("edit_prize_"))
+async def handle_edit_specific_prize(callback: CallbackQuery, state: FSMContext):
+    """Редактирование конкретного приза"""
+    await callback.answer()
+    prize_id = int(callback.data.replace("edit_prize_", ""))
+
+    # Проверяем, что приз принадлежит блогеру
+    user_id = callback.from_user.id
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if not blogger:
+        await callback.message.edit_text("❌ Доступ запрещен.")
+        return
+
+    prize = await db.get_prize_by_id(prize_id)
+    if not prize or prize.referral_code != blogger['referral_code']:
+        await callback.message.edit_text("❌ Приз не найден или доступ запрещен.")
+        return
+
+    # Сохраняем информацию о призе в состоянии
+    await state.update_data(
+        editing_prize_id=prize_id,
+        editing_prize=prize
+    )
+
+    text = f"✏️ <b>Редактирование приза</b>\n\n"
+    text += f"🎁 <b>{prize.title}</b>\n"
+    text += f"📝 {prize.description or 'Без описания'}\n"
+    text += f"🎯 {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
+    text += f"😊 Эмодзи: {prize.emoji}\n\n"
+    text += "Что вы хотите изменить?"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📈 Детальная статистика", callback_data="blogger_detailed_stats")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_blogger_menu")]
+        [InlineKeyboardButton(text="🏷️ Название", callback_data="edit_title")],
+        [InlineKeyboardButton(text="📝 Описание", callback_data="edit_description")],
+        [InlineKeyboardButton(text="🎯 Условие", callback_data="edit_achievement")],
+        [InlineKeyboardButton(text="😊 Эмодзи", callback_data="edit_emoji")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_blogger_prize")]
     ])
 
-    await message.answer(text, reply_markup=keyboard)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+# Обработчики редактирования призов
+@dp.callback_query(lambda c: c.data == "edit_title")
+async def handle_edit_title(callback: CallbackQuery, state: FSMContext):
+    """Редактирование названия приза"""
+    await callback.answer()
+
+    data = await state.get_data()
+    prize = data.get('editing_prize')
+    if not prize:
+        await callback.message.edit_text("❌ Ошибка: приз не найден.")
+        await state.clear()
+        return
+
+    text = f"✏️ <b>Редактирование названия</b>\n\n"
+    text += f"Текущее название: <b>{prize.title}</b>\n\n"
+    text += "Введите новое название приза:"
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+    ]))
+
+    await state.set_state(PrizeManagementStates.editing_prize_title)
+
+@dp.callback_query(lambda c: c.data == "edit_description")
+async def handle_edit_description(callback: CallbackQuery, state: FSMContext):
+    """Редактирование описания приза"""
+    await callback.answer()
+
+    data = await state.get_data()
+    prize = data.get('editing_prize')
+    if not prize:
+        await callback.message.edit_text("❌ Ошибка: приз не найден.")
+        await state.clear()
+        return
+
+    text = f"✏️ <b>Редактирование описания</b>\n\n"
+    text += f"Текущее описание: {prize.description or 'Без описания'}\n\n"
+    text += "Введите новое описание приза (или 'удалить' чтобы убрать описание):"
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_edit_description")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+    ]))
+
+    await state.set_state(PrizeManagementStates.editing_prize_description)
+
+@dp.callback_query(lambda c: c.data == "edit_achievement")
+async def handle_edit_achievement(callback: CallbackQuery, state: FSMContext):
+    """Редактирование условия получения приза"""
+    await callback.answer()
+
+    data = await state.get_data()
+    prize = data.get('editing_prize')
+    if not prize:
+        await callback.message.edit_text("❌ Ошибка: приз не найден.")
+        await state.clear()
+        return
+
+    text = f"✏️ <b>Редактирование условия</b>\n\n"
+    text += f"Текущее условие: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n\n"
+    text += "Выберите новый тип достижения:"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Стрик (дни подряд)", callback_data="edit_achievement_streak")],
+        [InlineKeyboardButton(text="🏅 Ранг", callback_data="edit_achievement_rank")],
+        [InlineKeyboardButton(text="📊 Уровень", callback_data="edit_achievement_level")],
+        [InlineKeyboardButton(text="✅ Задания", callback_data="edit_achievement_tasks")],
+        [InlineKeyboardButton(text="⭐ Опыт", callback_data="edit_achievement_experience")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data == "edit_emoji")
+async def handle_edit_emoji(callback: CallbackQuery, state: FSMContext):
+    """Редактирование эмодзи приза"""
+    await callback.answer()
+
+    data = await state.get_data()
+    prize = data.get('editing_prize')
+    if not prize:
+        await callback.message.edit_text("❌ Ошибка: приз не найден.")
+        await state.clear()
+        return
+
+    text = f"✏️ <b>Редактирование эмодзи</b>\n\n"
+    text += f"Текущий эмодзи: {prize.emoji}\n\n"
+    text += "Введите новый эмодзи для приза:"
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 По умолчанию", callback_data="default_edit_emoji")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+    ]))
+
+    await state.set_state(PrizeManagementStates.editing_prize_emoji)
+
+@dp.callback_query(lambda c: c.data == "cancel_edit")
+async def handle_cancel_edit(callback: CallbackQuery, state: FSMContext):
+    """Отмена редактирования приза"""
+    await callback.answer()
+    await state.clear()
+
+    # Возвращаемся к выбору приза для редактирования
+    await handle_edit_blogger_prize(callback)
+
+@dp.callback_query(lambda c: c.data.startswith("edit_achievement_"))
+async def handle_edit_achievement_type(callback: CallbackQuery, state: FSMContext):
+    """Выбор типа достижения при редактировании"""
+    await callback.answer()
+    achievement_type = callback.data.replace("edit_achievement_", "")
+
+    await state.update_data(editing_achievement_type=achievement_type)
+
+    # Показываем примеры значений для разных типов
+    examples = {
+        "streak": "Примеры: 7, 14, 30 (дни подряд)",
+        "rank": "Примеры: 3 (Ранг C), 4 (Ранг B), 5 (Ранг A), 6 (Ранг S)",
+        "level": "Примеры: 5, 10, 25 (уровень игрока)",
+        "tasks": "Примеры: 10, 50, 100 (выполненных заданий)",
+        "experience": "Примеры: 100, 500, 1000 (единиц опыта)"
+    }
+
+    text = f"✏️ <b>Редактирование условия</b>\n\n"
+    text += f"Тип достижения: {achievement_type.title()}\n"
+    text += f"{examples.get(achievement_type, '')}\n\n"
+    text += "Введите новое значение достижения:"
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+    ]))
+
+    await state.set_state(PrizeManagementStates.editing_achievement_value)
+
+@dp.callback_query(lambda c: c.data == "skip_edit_description")
+async def handle_skip_edit_description(callback: CallbackQuery, state: FSMContext):
+    """Пропуск редактирования описания"""
+    await callback.answer()
+    await state.update_data(editing_description="")
+
+    # Переходим к подтверждению изменений
+    await confirm_prize_edit(callback.message, state)
+
+# Обработчики состояний редактирования
+@dp.message(PrizeManagementStates.editing_prize_title)
+async def handle_editing_prize_title(message: Message, state: FSMContext):
+    """Обработка нового названия приза"""
+    title = message.text.strip()
+    if len(title) < 3:
+        await message.answer("❌ Название приза должно содержать минимум 3 символа.")
+        return
+
+    await state.update_data(editing_title=title)
+    await confirm_prize_edit(message, state)
+
+@dp.message(PrizeManagementStates.editing_prize_description)
+async def handle_editing_prize_description(message: Message, state: FSMContext):
+    """Обработка нового описания приза"""
+    description = message.text.strip()
+    if description.lower() == 'удалить':
+        description = ""
+
+    await state.update_data(editing_description=description)
+    await confirm_prize_edit(message, state)
+
+@dp.message(PrizeManagementStates.editing_achievement_value)
+async def handle_editing_achievement_value(message: Message, state: FSMContext):
+    """Обработка нового значения достижения"""
+    try:
+        value = int(message.text.strip())
+        if value <= 0:
+            await message.answer("❌ Значение должно быть положительным числом.")
+            return
+    except ValueError:
+        await message.answer("❌ Введите корректное число.")
+        return
+
+    await state.update_data(editing_achievement_value=value)
+    await confirm_prize_edit(message, state)
+
+@dp.message(PrizeManagementStates.editing_prize_emoji)
+async def handle_editing_prize_emoji(message: Message, state: FSMContext):
+    """Обработка нового эмодзи приза"""
+    emoji = message.text.strip()
+    if len(emoji) > 10:  # Проверка на слишком длинный ввод
+        await message.answer("❌ Эмодзи слишком длинное. Введите 1-10 символов.")
+        return
+
+    await state.update_data(editing_emoji=emoji)
+    await confirm_prize_edit(message, state)
+
+@dp.callback_query(lambda c: c.data == "default_edit_emoji")
+async def handle_default_edit_emoji(callback: CallbackQuery, state: FSMContext):
+    """Использование эмодзи по умолчанию при редактировании"""
+    await callback.answer()
+    await state.update_data(editing_emoji="🎁")
+    await confirm_prize_edit(callback.message, state)
+
+async def confirm_prize_edit(message, state: FSMContext):
+    """Подтверждение изменений приза"""
+    data = await state.get_data()
+    original_prize = data.get('editing_prize')
+
+    if not original_prize:
+        await message.answer("❌ Ошибка: приз не найден.")
+        await state.clear()
+        return
+
+    # Собираем измененные данные
+    changes = {}
+    if 'editing_title' in data:
+        changes['title'] = data['editing_title']
+    if 'editing_description' in data:
+        changes['description'] = data['editing_description']
+    if 'editing_achievement_type' in data:
+        changes['achievement_type'] = data['editing_achievement_type']
+    if 'editing_achievement_value' in data:
+        changes['achievement_value'] = data['editing_achievement_value']
+    if 'editing_emoji' in data:
+        changes['emoji'] = data['editing_emoji']
+
+    if not changes:
+        await message.answer("❌ Нет изменений для применения.")
+        await state.clear()
+        return
+
+    # Показываем что изменится
+    text = "✏️ <b>Подтверждение изменений</b>\n\n"
+    text += f"🎁 <b>{original_prize.title}</b>\n\n"
+
+    if 'editing_title' in data:
+        text += f"🏷️ Название: {original_prize.title} → <b>{data['editing_title']}</b>\n"
+    if 'editing_description' in data:
+        old_desc = original_prize.description or 'Без описания'
+        new_desc = data['editing_description'] or 'Без описания'
+        text += f"📝 Описание: {old_desc} → <b>{new_desc}</b>\n"
+    if 'editing_achievement_type' in data or 'editing_achievement_value' in data:
+        new_type = data.get('editing_achievement_type', original_prize.achievement_type)
+        new_value = data.get('editing_achievement_value', original_prize.achievement_value)
+        old_achievement = get_achievement_description(original_prize.achievement_type, original_prize.achievement_value)
+        new_achievement = get_achievement_description(new_type, new_value)
+        text += f"🎯 Условие: {old_achievement} → <b>{new_achievement}</b>\n"
+    if 'editing_emoji' in data:
+        text += f"😊 Эмодзи: {original_prize.emoji} → <b>{data['editing_emoji']}</b>\n"
+
+    text += "\nПрименить эти изменения?"
+
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Применить", callback_data="confirm_prize_edit")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+    ]))
+
+    await state.set_state(PrizeManagementStates.confirming_prize_edit)
+
+@dp.callback_query(lambda c: c.data == "confirm_prize_edit")
+async def handle_confirm_prize_edit(callback: CallbackQuery, state: FSMContext):
+    """Применение изменений приза"""
+    await callback.answer()
+
+    data = await state.get_data()
+    prize_id = data.get('editing_prize_id')
+    original_prize = data.get('editing_prize')
+
+    if not prize_id or not original_prize:
+        await callback.message.edit_text("❌ Ошибка: данные приза не найдены.")
+        await state.clear()
+        return
+
+    # Проверяем права доступа
+    user_id = callback.from_user.id
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if not blogger or original_prize.referral_code != blogger['referral_code']:
+        await callback.message.edit_text("❌ Доступ запрещен.")
+        await state.clear()
+        return
+
+    # Создаем обновленный объект приза
+    updated_prize = Prize(
+        id=prize_id,
+        prize_type=original_prize.prize_type,
+        referral_code=original_prize.referral_code,
+        title=data.get('editing_title', original_prize.title),
+        description=data.get('editing_description', original_prize.description),
+        achievement_type=data.get('editing_achievement_type', original_prize.achievement_type),
+        achievement_value=data.get('editing_achievement_value', original_prize.achievement_value),
+        emoji=data.get('editing_emoji', original_prize.emoji),
+        is_active=original_prize.is_active,
+        created_at=original_prize.created_at,
+        updated_at=int(datetime.datetime.now().timestamp())
+    )
+
+    # Сохраняем изменения
+    success = await db.save_prize(updated_prize)
+
+    if success:
+        await callback.message.edit_text(
+            f"✅ <b>Приз успешно обновлен!</b>\n\n"
+            f"🎁 <b>{updated_prize.title}</b>\n"
+            f"✏️ Изменения применены",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎁 К управлению призами", callback_data="back_to_blogger_menu")],
+                [InlineKeyboardButton(text="✏️ Редактировать еще", callback_data="edit_blogger_prize")]
+            ])
+        )
+    else:
+        await callback.message.edit_text(
+            "❌ Ошибка при обновлении приза.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="edit_blogger_prize")]
+            ])
+        )
+
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data.startswith("delete_prize_"))
+async def handle_delete_specific_prize(callback: CallbackQuery):
+    """Удаление конкретного приза"""
+    await callback.answer()
+    prize_id = int(callback.data.replace("delete_prize_", ""))
+
+    # Проверяем, что приз принадлежит блогеру
+    user_id = callback.from_user.id
+    blogger = await db.get_blogger_by_telegram_id(user_id)
+    if not blogger:
+        await callback.message.edit_text("❌ Доступ запрещен.")
+        return
+
+    prize = await db.get_prize_by_id(prize_id)
+    if not prize or prize.referral_code != blogger['referral_code']:
+        await callback.message.edit_text("❌ Приз не найден или доступ запрещен.")
+        return
+
+    # Удаляем приз
+    success = await db.delete_prize(prize_id)
+
+    if success:
+        await callback.message.edit_text(
+            f"✅ <b>Приз удален!</b>\n\n"
+            f"🎁 {prize.title}\n\n"
+            f"Приз больше не доступен для ваших подписчиков.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ К управлению призами", callback_data="back_to_blogger_menu")]
+            ])
+        )
+    else:
+        await callback.message.edit_text(
+            "❌ Ошибка при удалении приза.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="delete_blogger_prize")]
+            ])
+        )
+
+@dp.callback_query(lambda c: c.data == "cancel_blogger_prize")
+async def handle_cancel_blogger_prize(callback: CallbackQuery, state: FSMContext):
+    """Отмена операций с призами блогера"""
+    await callback.answer()
+    await state.clear()
+
+    # Возвращаемся к управлению призами
+    await handle_blogger_prizes(callback.message)
 
 # Вспомогательные функции
 
@@ -1161,44 +1754,77 @@ async def handle_confirm_create_prize(callback: CallbackQuery, state: FSMContext
 
     data = await state.get_data()
     user_id = callback.from_user.id
+    logger.info(f"handle_confirm_create_prize вызвана. User: {user_id}, Data keys: {list(data.keys())}")
+    logger.info(f"FSM Data: {data}")
 
-    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+    # Проверяем роль пользователя
+    user_role = await get_user_role(user_id)
+    if user_role not in [ModeratorRole.ADMIN, ModeratorRole.BLOGGER]:
         await callback.message.edit_text("❌ У вас нет доступа к этой функции.")
         await state.clear()
         return
 
+    # Определяем referral_code
+    referral_code = None
+    prize_type = data.get('prize_type')
+
+    if not prize_type:
+        logger.error(f"prize_type не найден в данных FSM state. Data: {data}")
+        await callback.message.edit_text("❌ Ошибка: тип приза не определен. Попробуйте создать приз заново.")
+        await state.clear()
+        return
+
+    if prize_type == 'blogger':
+        referral_code = data.get('blogger_referral_code')
+        if not referral_code:
+            await callback.message.edit_text("❌ Ошибка: реферальный код не найден.")
+            await state.clear()
+            return
+
     # Создаем объект приза
     prize = Prize(
-        prize_type=PrizeType.ADMIN if data['prize_type'] == 'admin' else PrizeType.BLOGGER,
+        prize_type=PrizeType.ADMIN if prize_type == 'admin' else PrizeType.BLOGGER,
+        referral_code=referral_code,
         title=data['prize_title'],
         description=data.get('prize_description', ''),
         achievement_type=data['achievement_type'],
         achievement_value=data['achievement_value'],
         emoji=data.get('prize_emoji', '🎁'),
         is_active=True,
-        created_at=int(datetime.datetime.now().timestamp()),
-        updated_at=int(datetime.datetime.now().timestamp())
+        created_at=int(datetime.now().timestamp()),
+        updated_at=int(datetime.now().timestamp())
     )
 
     # Сохраняем в БД
     prize_id = await db.save_prize(prize)
 
     if prize_id:
+        # Определяем кнопки возврата в зависимости от роли
+        if prize_type == 'blogger':
+            back_callback = "back_to_blogger_menu"
+            create_another_callback = "create_blogger_prize"
+            user_description = "вашим подписчикам"
+        else:
+            back_callback = "back_to_admin_menu"
+            create_another_callback = "create_prize_admin"
+            user_description = "пользователям"
+
         await callback.message.edit_text(
             f"✅ <b>Приз успешно создан!</b>\n\n"
             f"🏷️ <b>{prize.title}</b>\n"
             f"🆔 ID: {prize_id}\n\n"
-            f"Приз теперь доступен для получения пользователями.",
+            f"Приз теперь доступен для получения {user_description}.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎁 К управлению призами", callback_data="back_to_admin_menu")],
-                [InlineKeyboardButton(text="➕ Создать еще один", callback_data="create_prize_admin")]
+                [InlineKeyboardButton(text="🎁 К управлению призами", callback_data=back_callback)],
+                [InlineKeyboardButton(text="➕ Создать еще один", callback_data=create_another_callback)]
             ])
         )
     else:
+        back_callback = "back_to_blogger_menu" if prize_type == 'blogger' else "back_to_admin_menu"
         await callback.message.edit_text(
             "❌ Ошибка при создании приза.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]
             ])
         )
 

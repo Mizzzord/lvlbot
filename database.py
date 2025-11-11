@@ -1559,6 +1559,102 @@ class Database:
                 logger.error(f"Ошибка при создании уведомления о задании {task_id}: {e}")
                 return False
 
+    # Методы для работы с блогерами
+    async def get_blogger_stats(self, blogger_telegram_id: int) -> dict:
+        """Получение статистики блогера"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем реферальный код блогера
+            blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
+            if not blogger:
+                return {'error': 'Блогер не найден'}
+
+            referral_code = blogger['referral_code']
+
+            # Статистика подписчиков
+            cursor = await db.execute('''
+                SELECT COUNT(*) as total_subscribers
+                FROM users
+                WHERE referral_code = ?
+            ''', (referral_code,))
+
+            subscribers_row = await cursor.fetchone()
+            total_subscribers = subscribers_row[0] if subscribers_row else 0
+
+            # Статистика активных подписчиков (с подпиской)
+            cursor = await db.execute('''
+                SELECT COUNT(*) as active_subscribers
+                FROM users
+                WHERE referral_code = ? AND subscription_active = 1
+            ''', (referral_code,))
+
+            active_row = await cursor.fetchone()
+            active_subscribers = active_row[0] if active_row else 0
+
+            # Количество выполненных заданий подписчиками
+            cursor = await db.execute('''
+                SELECT COUNT(*) as total_tasks
+                FROM daily_tasks dt
+                JOIN users u ON dt.user_id = u.telegram_id
+                WHERE u.referral_code = ? AND dt.status IN ('approved', 'completed')
+            ''', (referral_code,))
+
+            tasks_row = await cursor.fetchone()
+            total_tasks = tasks_row[0] if tasks_row else 0
+
+            return {
+                'referral_code': referral_code,
+                'total_subscribers': total_subscribers,
+                'active_subscribers': active_subscribers,
+                'inactive_subscribers': total_subscribers - active_subscribers,
+                'total_tasks_completed': total_tasks
+            }
+
+    async def get_blogger_top_subscribers(self, blogger_telegram_id: int, limit: int = 10) -> list[dict]:
+        """Получение топ-10 подписчиков блогера по опыту"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем реферальный код блогера
+            blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
+            if not blogger:
+                return []
+
+            referral_code = blogger['referral_code']
+
+            # Получаем топ подписчиков по опыту
+            cursor = await db.execute('''
+                SELECT
+                    u.telegram_id,
+                    u.name,
+                    ps.nickname,
+                    us.experience,
+                    us.level,
+                    COUNT(dt.id) as tasks_completed
+                FROM users u
+                LEFT JOIN user_stats us ON u.telegram_id = us.user_id
+                LEFT JOIN player_stats ps ON u.telegram_id = ps.user_id
+                LEFT JOIN daily_tasks dt ON u.telegram_id = dt.user_id AND dt.status IN ('approved', 'completed')
+                WHERE u.referral_code = ?
+                GROUP BY u.telegram_id, u.name, ps.nickname, us.experience, us.level
+                ORDER BY us.experience DESC, tasks_completed DESC
+                LIMIT ?
+            ''', (referral_code, limit))
+
+            rows = await cursor.fetchall()
+
+            result = []
+            for row in rows:
+                telegram_id, name, nickname, experience, level, tasks_completed = row
+                display_name = nickname or name or f"User_{telegram_id}"
+
+                result.append({
+                    'telegram_id': telegram_id,
+                    'display_name': display_name,
+                    'experience': experience or 0,
+                    'level': level or 1,
+                    'tasks_completed': tasks_completed or 0
+                })
+
+            return result
+
     # Методы для статистики модерации
     async def get_moderator_stats(self, moderator_id: int) -> dict:
         """Получение статистики модерации для конкретного модератора"""
