@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 # Определение состояний FSM
 class UserRegistration(StatesGroup):
-    waiting_for_language = State()
     waiting_for_privacy_policy = State()
     waiting_for_name = State()
     waiting_for_birth_date = State()
@@ -79,66 +78,7 @@ def create_main_menu_keyboard() -> ReplyKeyboardMarkup:
         one_time_keyboard=False
     )
 
-def create_language_keyboard() -> ReplyKeyboardMarkup:
-    """Создание клавиатуры выбора языка"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🇷🇺 Русский")],
-            [KeyboardButton(text="🇺🇿 O'zbek")],
-            [KeyboardButton(text="🇰🇿 Қазақ")],
-            [KeyboardButton(text="🇰🇬 Кыргыз")],
-            [KeyboardButton(text="🇹🇯 Тоҷики")],
-            [KeyboardButton(text="🇹🇲 Türkmen")],
-            [KeyboardButton(text="🇺🇦 Українська")],
-            [KeyboardButton(text="🇧🇾 Беларуская")],
-            [KeyboardButton(text="🇲🇩 Молдавська")],
-            [KeyboardButton(text="🇦🇿 Azərbaycan")],
-            [KeyboardButton(text="🇬🇪 ქართული")],
-            [KeyboardButton(text="🇦🇲 Հայերեն")],
-            [KeyboardButton(text="🇺🇸 English")],
-            [KeyboardButton(text="Отмена")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
 
-def get_language_code(language_text: str) -> Optional[str]:
-    """Преобразование текста выбора языка в код языка"""
-    language_map = {
-        "🇷🇺 Русский": "ru",
-        "🇺🇿 O'zbek": "uz",
-        "🇰🇿 Қазақ": "kk",
-        "🇰🇬 Кыргыз": "ky",
-        "🇹🇯 Тоҷики": "tg",
-        "🇹🇲 Türkmen": "tk",
-        "🇺🇦 Українська": "uk",
-        "🇧🇾 Беларуская": "be",
-        "🇲🇩 Молдавська": "mo",
-        "🇦🇿 Azərbaycan": "az",
-        "🇬🇪 ქართული": "ka",
-        "🇦🇲 Հայերեն": "hy",
-        "🇺🇸 English": "en"
-    }
-    return language_map.get(language_text)
-
-def get_language_emoji(language_code: str) -> str:
-    """Преобразование кода языка в эмодзи"""
-    emoji_map = {
-        "ru": "🇷🇺 Русский",
-        "uz": "🇺🇿 O'zbek",
-        "kk": "🇰🇿 Қазақ",
-        "ky": "🇰🇬 Кыргыз",
-        "tg": "🇹🇯 Тоҷики",
-        "tk": "🇹🇲 Türkmen",
-        "uk": "🇺🇦 Українська",
-        "be": "🇧🇾 Беларуская",
-        "mo": "🇲🇩 Молдавська",
-        "az": "🇦🇿 Azərbaycan",
-        "ka": "🇬🇪 ქართული",
-        "hy": "🇦🇲 Հայերեն",
-        "en": "🇺🇸 English"
-    }
-    return emoji_map.get(language_code, language_code)
 
 async def improve_goal_with_ai(goal: str) -> str:
     """Улучшает формулировку цели с помощью OpenRouter API"""
@@ -526,7 +466,6 @@ async def cmd_start(message: Message, state: FSMContext):
 
     if existing_user and existing_user.is_complete:
         # Пользователь уже зарегистрирован
-        language_emoji = get_language_emoji(existing_user.language)
         referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
         goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
 
@@ -572,7 +511,6 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 f"С возвращением, {existing_user.name}! 👋\n\n"
                 f"Ты уже в нашей команде изменений!\n\n"
-                f"🌐 Язык: {language_emoji}\n"
                 f"👤 Имя: {existing_user.name}\n"
                 f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
                 f"📏 Рост: {existing_user.height} см\n"
@@ -593,54 +531,37 @@ async def cmd_start(message: Message, state: FSMContext):
             f"Привет, {user_name}! 👋 Я GoPrime — твой личный мотивационный помощник в Telegram. Я помогу тебе достигать целей шаг за шагом: каждый день буду предлагать простые, но мощные задания, адаптированные под твои приоритеты — фитнес, обучение, карьера, хобби или что-то своё. Расскажи о своей главной цели, и мы сразу начнём! Готов к первым шагам к успеху? 🚀"
         )
 
-        # Начинаем регистрацию с выбора языка
-        await state.set_state(UserRegistration.waiting_for_language)
+        # Начинаем регистрацию с политики конфиденциальности
+        await state.set_state(UserRegistration.waiting_for_privacy_policy)
         await message.answer(
             "🤖 Для начала давайте настроим бота под вас.\n\n"
-            "Выберите удобный язык:",
-            reply_markup=create_language_keyboard()
+            "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
+            "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
+            "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
+            "И нашей политикой обработки персональных данных:\n"
+            "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
+            "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
+            ])
         )
 
-@router.message(UserRegistration.waiting_for_language)
-async def process_language(message: Message, state: FSMContext):
-    """Обработка выбора языка"""
-    language_code = get_language_code(message.text.strip())
-
-    if language_code is None:
-        await message.answer(
-            "Пожалуйста, выберите язык из предложенных вариантов:",
-            reply_markup=create_language_keyboard()
-        )
-        return
-
-    # Сохраняем язык во временном состоянии
-    await state.update_data(language=language_code)
-
-    telegram_id = message.from_user.id
-    user = await db.get_user(telegram_id) or User(telegram_id=telegram_id)
-    user.language = language_code
-    await db.save_user(user)
-
-    await state.set_state(UserRegistration.waiting_for_privacy_policy)
-    await message.answer(
-        f"Отлично! Вы выбрали язык: {get_language_emoji(language_code)}\n\n"
-        "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
-        "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
-        "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
-        "И нашей политикой обработки персональных данных:\n"
-        "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
-        "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
-        ])
-    )
 
 @router.callback_query(lambda c: c.data == "privacy_confirmed")
 async def handle_privacy_confirmed(callback: CallbackQuery, state: FSMContext):
     """Обработка подтверждения политики конфиденциальности"""
     await callback.answer()
+
+    # Автоматически устанавливаем русский язык
+    telegram_id = callback.from_user.id
+    user = await db.get_user(telegram_id) or User(telegram_id=telegram_id)
+    user.language = "ru"
+    await db.save_user(user)
+
+    # Сохраняем язык во временном состоянии
+    await state.update_data(language="ru")
 
     await state.set_state(UserRegistration.waiting_for_name)
     await callback.message.answer(
@@ -1004,7 +925,6 @@ async def finalize_registration(message: Message, state: FSMContext, user_id: in
 
     await message.edit_text(
         f"🎉 Отлично! Регистрация завершена!\n\n"
-        f"🌐 Язык: {get_language_emoji(language)}\n"
         f"👤 Имя: {name}\n"
         f"📅 Дата рождения: {data.get('birth_date').strftime('%d.%m.%Y') if data.get('birth_date') else 'Не указана'}\n"
         f"📏 Рост: {data.get('height')} см\n"
