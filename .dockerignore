@@ -1,12 +1,15 @@
 # Git
 .git
 .gitignore
+.gitattributes
 
 # Node.js
 node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.npm
+.eslintcache
 
 # Python
 __pycache__
@@ -29,39 +32,51 @@ coverage.xml
 venv/
 ENV/
 env/
+*.egg-info/
 
 # IDE
 .vscode
 .idea
 *.swp
 *.swo
+*.swn
+.DS_Store
 
 # OS
 .DS_Store
 Thumbs.db
+*.tmp
 
-# Project specific
-bot_database.db
-player_cards/
-player_photos/
-task_submissions/
+# Project specific - НЕ игнорируем базу данных и медиа
+# Они нужны для начальной инициализации
 moderator_bot.log
 *.log
 
-# Docker
+# Docker файлы - игнорируем
 Dockerfile*
 docker-compose*.yml
 .dockerignore
 
 # Documentation
-README.md
 overview.md
-*.md
-Инструкция*
 
 # Scripts
 start-all.sh
 start-all.ps1
+deploy.sh
 
-# Examples
+# Examples and docs
 example.env
+env.example
+*.md
+!requirements.txt
+!package.json
+
+# Testing
+test_*
+*.test.js
+*.test.py
+
+# Temporary
+temp_uploads/
+.pytest_cache/

@@ -35,10 +35,19 @@ OPENROUTER_API_KEY=your_openrouter_api_key_here
 WATA_TOKEN=your_wata_bearer_token_here
 ```
 
-### 3. Запуск сервисов
+### 3. Проверка конфигурации (рекомендуется)
+```bash
+# Запуск проверки Docker конфигурации
+./test-docker.sh
+```
+
+### 4. Запуск сервисов
 ```bash
 # Сборка и запуск всех сервисов
 docker-compose up -d --build
+
+# Или с новым синтаксисом Docker Compose
+docker compose up -d --build
 
 # Просмотр логов
 docker-compose logs -f

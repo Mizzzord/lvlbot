@@ -2,31 +2,54 @@
 FROM node:18-alpine
 
 # Установка системных зависимостей для Canvas
+# Разделяем на build-time и runtime зависимости
 RUN apk add --no-cache \
-    cairo-dev \
-    jpeg-dev \
-    giflib-dev \
-    librsvg-dev \
-    pango-dev \
-    pixman-dev \
+    # Build dependencies
+    build-base \
+    g++ \
+    make \
+    python3 \
+    py3-setuptools \
+    # Runtime dependencies для canvas
+    cairo \
+    jpeg \
+    giflib \
+    pango \
+    pixman \
     fontconfig \
-    ttf-dejavu \
-    ttf-liberation
+    font-noto \
+    font-noto-emoji \
+    && fc-cache -f
 
 # Создание директории приложения
 WORKDIR /app
+
 # Копирование package.json и установка зависимостей
 COPY package*.json ./
 RUN npm ci --only=production
+
+# Удаляем только build зависимости, оставляя runtime
+RUN apk del build-base g++ make python3 py3-setuptools
+
 # Копирование исходного кода
 COPY card-generator.js server.js ./
 
-RUN apk del build-base g++ make python3 py3-setuptools cairo-dev jpeg-dev giflib-dev librsvg-dev pango-dev pixman-dev
 # Создание директорий для данных
 RUN mkdir -p player_cards player_photos temp_uploads
+
+# Создание non-root пользователя для безопасности
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 && \
+    chown -R nodejs:nodejs /app
+
+USER nodejs
 
 # Порт для приложения
 EXPOSE 3000
 
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+
 # Команда запуска
-CMD ["npm", "start"]
+CMD ["node", "server.js"]

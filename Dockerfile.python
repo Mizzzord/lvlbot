@@ -5,6 +5,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     gcc \
     sqlite3 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Создание директории приложения
@@ -12,42 +13,80 @@ WORKDIR /app
 
 # Копирование requirements.txt и установка Python зависимостей
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt certifi
 
 # Копирование исходного кода Python
 COPY *.py ./
 
 # Создание директорий для данных
-RUN mkdir -p player_cards player_photos task_submissions __pycache__
+RUN mkdir -p player_cards player_photos task_submissions
 
 # Установка переменных окружения
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+# Создание non-root пользователя для безопасности
+RUN useradd -m -u 1001 -s /bin/bash botuser && \
+    chown -R botuser:botuser /app
+
+USER botuser
+
 # Создание entrypoint скрипта для запуска обоих ботов
-RUN echo '#!/bin/bash\n\
-echo "🚀 Запуск Motivation Bot сервисов..."\n\
-\n\
-# Запуск основного бота в фоне\n\
-python bot.py &\n\
-BOT_PID=$!\n\
-echo "🎯 Основной бот запущен (PID: $BOT_PID)"\n\
-\n\
-# Запуск модераторского бота в фоне\n\
-python moderator_bot.py &\n\
-MODERATOR_PID=$!\n\
-echo "⚔️ Модераторский бот запущен (PID: $MODERATOR_PID)"\n\
-\n\
-echo ""\n\
-echo "✅ Все Python боты запущены!"\n\
-echo "📋 PID процессов:"\n\
-echo "  • Основной бот: $BOT_PID"\n\
-echo "  • Модераторский бот: $MODERATOR_PID"\n\
-echo ""\n\
-echo "🛑 Для остановки нажмите Ctrl+C"\n\
-\n\
-# Ожидание завершения процессов\n\
-wait' > /app/start-bots.sh && chmod +x /app/start-bots.sh
+COPY --chown=botuser:botuser <<EOF /app/start-bots.sh
+#!/bin/bash
+set -e
+
+echo "🚀 Запуск Motivation Bot сервисов..."
+
+# Функция для graceful shutdown
+cleanup() {
+    echo ""
+    echo "🛑 Получен сигнал остановки..."
+    kill -TERM \$BOT_PID \$MODERATOR_PID 2>/dev/null || true
+    wait \$BOT_PID \$MODERATOR_PID
+    echo "✅ Все боты остановлены"
+    exit 0
+}
+
+trap cleanup SIGTERM SIGINT
+
+# Ожидание доступности Node.js сервиса
+echo "⏳ Ожидание Node.js сервиса..."
+for i in {1..30}; do
+    if curl -f http://card-generator:3000/health >/dev/null 2>&1; then
+        echo "✅ Node.js сервис доступен"
+        break
+    fi
+    echo "Попытка \$i/30..."
+    sleep 2
+done
+
+# Запуск основного бота в фоне
+python bot.py &
+BOT_PID=\$!
+echo "🎯 Основной бот запущен (PID: \$BOT_PID)"
+
+# Ожидание инициализации
+sleep 2
+
+# Запуск модераторского бота в фоне
+python moderator_bot.py &
+MODERATOR_PID=\$!
+echo "⚔️ Модераторский бот запущен (PID: \$MODERATOR_PID)"
+
+echo ""
+echo "✅ Все Python боты запущены!"
+echo "📋 PID процессов:"
+echo "  • Основной бот: \$BOT_PID"
+echo "  • Модераторский бот: \$MODERATOR_PID"
+echo ""
+echo "🛑 Для остановки нажмите Ctrl+C"
+
+# Ожидание завершения процессов
+wait \$BOT_PID \$MODERATOR_PID
+EOF
+
+RUN chmod +x /app/start-bots.sh
 
 # Команда запуска
 CMD ["/app/start-bots.sh"]

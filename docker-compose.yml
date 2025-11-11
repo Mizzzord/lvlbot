@@ -10,11 +10,11 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./player_cards:/app/player_cards
-      - ./player_photos:/app/player_photos
+      - player-cards:/app/player_cards
+      - player-photos:/app/player_photos
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -32,10 +32,10 @@ services:
       card-generator:
         condition: service_healthy
     volumes:
-      - ./bot_database.db:/app/bot_database.db
-      - ./player_cards:/app/player_cards
-      - ./player_photos:/app/player_photos
-      - ./task_submissions:/app/task_submissions
+      - bot-database:/app/bot_database.db
+      - player-cards:/app/player_cards
+      - player-photos:/app/player_photos
+      - task-submissions:/app/task_submissions
       - ./.env:/app/.env:ro
     restart: unless-stopped
     environment:
@@ -64,5 +64,11 @@ networks:
     driver: bridge
 
 volumes:
-  bot-data:
+  bot-database:
+    driver: local
+  player-cards:
+    driver: local
+  player-photos:
+    driver: local
+  task-submissions:
     driver: local
