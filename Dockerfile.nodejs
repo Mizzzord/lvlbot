@@ -17,12 +17,14 @@ RUN apt-get update && apt-get install -y \
     libpixman-1-dev \
     fontconfig \
     fonts-noto \
-    fonts-noto-emoji \
-    # Дополнительные runtime зависимости
+    fonts-dejavu \
+    fonts-liberation \
+    # Дополнительные runtime зависимости (устанавливаем с fallback)
     libpangocairo-1.0-0 \
-    libgif7 \
-    libjpeg62-turbo \
-    libpng16-16 \
+    && (apt-get install -y libgif7 || apt-get install -y libgif4 || true) \
+    && (apt-get install -y libjpeg62-turbo || apt-get install -y libjpeg-turbo-progs || true) \
+    && (apt-get install -y libpng16-16 || apt-get install -y libpng-dev || true) \
+    && fc-cache -f -v \
     && rm -rf /var/lib/apt/lists/*
 
 # Создание директории приложения

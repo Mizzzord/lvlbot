@@ -221,6 +221,16 @@ ERROR: failed to build: failed to solve: node:18-bullseye-slim: failed to resolv
    docker load < python.tar
    ```
 
+### Проблема: Недоступные пакеты в Debian
+```bash
+E: Unable to locate package fonts-noto-emoji
+```
+
+**Решение:** Dockerfile уже исправлен и использует доступные пакеты шрифтов:
+- `fonts-noto-emoji` заменен на `fonts-noto`, `fonts-dejavu`, `fonts-liberation`
+- Добавлены fallback установки для пакетов с разными версиями
+- Пересоберите образ: `docker-compose build --no-cache card-generator`
+
 ### Проблема: Ошибка сборки Node.js образа (canvas)
 ```bash
 ERROR: failed to build: failed to solve: process "/bin/sh -c npm ci --only=production" did not complete successfully
@@ -229,6 +239,8 @@ ERROR: failed to build: failed to solve: process "/bin/sh -c npm ci --only=produ
 **Решение:** Убедитесь, что используете обновленную версию `Dockerfile.nodejs` с Ubuntu базовым образом:
 - Dockerfile изменен на `node:18-bullseye-slim` вместо Alpine
 - Добавлены все необходимые системные зависимости для Linux
+- Исправлены пакеты шрифтов (заменен недоступный `fonts-noto-emoji` на доступные альтернативы)
+- Добавлен fallback для пакетов с разными версиями
 - Пересоберите образ: `docker-compose build --no-cache card-generator`
 
 ### Проблема: Боты не отвечают в Telegram
