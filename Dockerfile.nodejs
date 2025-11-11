@@ -10,7 +10,7 @@ RUN apk add --no-cache \
     pango-dev \
     pixman-dev \
     fontconfig \
-    ttf-dejavu-sans \
+    ttf-dejavu \
     ttf-liberation
 
 # Создание директории приложения
