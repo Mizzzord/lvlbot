@@ -1,0 +1,53 @@
+# Dockerfile для Python ботов
+FROM python:3.11-slim
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
+    gcc \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Создание директории приложения
+WORKDIR /app
+
+# Копирование requirements.txt и установка Python зависимостей
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копирование исходного кода Python
+COPY *.py ./
+
+# Создание директорий для данных
+RUN mkdir -p player_cards player_photos task_submissions __pycache__
+
+# Установка переменных окружения
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Создание entrypoint скрипта для запуска обоих ботов
+RUN echo '#!/bin/bash\n\
+echo "🚀 Запуск Motivation Bot сервисов..."\n\
+\n\
+# Запуск основного бота в фоне\n\
+python bot.py &\n\
+BOT_PID=$!\n\
+echo "🎯 Основной бот запущен (PID: $BOT_PID)"\n\
+\n\
+# Запуск модераторского бота в фоне\n\
+python moderator_bot.py &\n\
+MODERATOR_PID=$!\n\
+echo "⚔️ Модераторский бот запущен (PID: $MODERATOR_PID)"\n\
+\n\
+echo ""\n\
+echo "✅ Все Python боты запущены!"\n\
+echo "📋 PID процессов:"\n\
+echo "  • Основной бот: $BOT_PID"\n\
+echo "  • Модераторский бот: $MODERATOR_PID"\n\
+echo ""\n\
+echo "🛑 Для остановки нажмите Ctrl+C"\n\
+\n\
+# Ожидание завершения процессов\n\
+wait' > /app/start-bots.sh && chmod +x /app/start-bots.sh
+
+# Команда запуска
+CMD ["/app/start-bots.sh"]
