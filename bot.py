@@ -226,6 +226,78 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
         logger.error(f"Error analyzing player photo: {e}")
         return {'strength': 50, 'agility': 50, 'endurance': 50}
 
+async def create_player_card_image_nodejs(photo_path: str, nickname: str, experience: int, stats: dict) -> str:
+    """
+    Создает изображение карточки игрока с помощью Node.js сервиса
+
+    Args:
+        photo_path: путь к фото пользователя
+        nickname: ник игрока
+        experience: опыт игрока
+        stats: словарь с характеристиками
+
+    Returns:
+        str: путь к созданному изображению карточки
+    """
+    try:
+        # Отправляем запрос к Node.js сервису
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            payload = {
+                "photoPath": photo_path,
+                "nickname": nickname,
+                "experience": experience,
+                "stats": stats
+            }
+
+            async with session.post(
+                "http://localhost:3000/generate-card",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                logger.info(f"Node.js response status: {response.status}")
+                logger.info(f"Node.js response headers: {dict(response.headers)}")
+
+                if response.status == 200:
+                    # Получаем изображение
+                    image_data = await response.read()
+                    logger.info(f"Получено {len(image_data)} байт от Node.js сервиса")
+
+                    # Проверяем, что это действительно изображение (начинается с PNG сигнатуры)
+                    if not image_data.startswith(b'\x89PNG'):
+                        logger.error(f"Полученные данные не являются PNG изображением. Первые байты: {image_data[:50].hex()}")
+                        # Попробуем распарсить как JSON с ошибкой
+                        try:
+                            error_json = image_data.decode('utf-8')
+                            logger.error(f"Ответ сервера (JSON): {error_json}")
+                        except:
+                            logger.error("Не удалось декодировать ответ сервера")
+                        raise Exception("Node.js service returned invalid image data")
+
+                    # Проверяем Content-Type
+                    content_type = response.headers.get('Content-Type', '')
+                    if 'image/png' not in content_type.lower():
+                        logger.warning(f"Content-Type не соответствует изображению: {content_type}")
+
+                    # Сохраняем изображение
+                    cards_dir = "player_cards"
+                    os.makedirs(cards_dir, exist_ok=True)
+
+                    card_filename = f"{cards_dir}/card_{nickname}_{int(datetime.datetime.now().timestamp())}.png"
+                    with open(card_filename, 'wb') as f:
+                        f.write(image_data)
+
+                    logger.info(f"Карточка игрока создана через Node.js: {card_filename}")
+                    return card_filename
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Node.js сервис вернул ошибку {response.status}: {error_text}")
+                    raise Exception(f"Node.js service error: {response.status}")
+
+    except Exception as e:
+        logger.warning(f"Не удалось создать карточку через Node.js сервис: {e}")
+        raise e
+
+
 async def create_player_card_image(photo_path: str, nickname: str, experience: int, stats: dict) -> str:
     """
     Создает изображение карточки игрока
@@ -1175,18 +1247,35 @@ async def process_player_photo(message: Message, state: FSMContext):
             stats = await analyze_player_photo(photo_bytes)
 
         # Создаем изображение карточки игрока
-        card_image_path = await create_player_card_image(
-            photo_path=photo_path,
-            nickname=nickname,
-            experience=0,
-            stats={
-                'strength': stats['strength'],
-                'agility': stats['agility'],
-                'endurance': stats['endurance'],
-                'intelligence': 50,
-                'charisma': 50
-            }
-        )
+        try:
+            # Сначала пытаемся использовать Node.js сервис
+            card_image_path = await create_player_card_image_nodejs(
+                photo_path=photo_path,
+                nickname=nickname,
+                experience=0,
+                stats={
+                    'strength': stats['strength'],
+                    'agility': stats['agility'],
+                    'endurance': stats['endurance'],
+                    'intelligence': 50,
+                    'charisma': 50
+                }
+            )
+        except Exception as e:
+            # Fallback на PIL если Node.js сервис недоступен
+            logger.warning(f"Используем PIL fallback: {e}")
+            card_image_path = await create_player_card_image(
+                photo_path=photo_path,
+                nickname=nickname,
+                experience=0,
+                stats={
+                    'strength': stats['strength'],
+                    'agility': stats['agility'],
+                    'endurance': stats['endurance'],
+                    'intelligence': 50,
+                    'charisma': 50
+                }
+            )
 
         if is_photo_change:
             # Это замена фото - обновляем существующую запись
@@ -1841,7 +1930,8 @@ async def handle_change_photo(callback: CallbackQuery, state: FSMContext):
     """Обработка замены фотографии"""
     await callback.answer()
 
-    await callback.message.edit_text(
+    # Вместо редактирования отправляем новое сообщение
+    await callback.message.answer(
         "📸 <b>Замена фотографии</b>\n\n"
         "Отправьте новое фото для анализа.\n"
         "Старые характеристики будут сохранены.\n\n"

@@ -17,8 +17,15 @@ cd lvlbot
 ```
 
 ### 2. Установка зависимостей
+
+#### Python зависимости
 ```bash
 pip install -r requirements.txt
+```
+
+#### Node.js зависимости (для генерации карточек)
+```bash
+npm install
 ```
 
 ### 3. Настройка токенов
@@ -49,7 +56,14 @@ BLOGGER_TELEGRAM_IDS = [
 - **OPENROUTER_API_KEY**: получить на [openrouter.ai](https://openrouter.ai)
 - **ADMIN/BLOGGER_TELEGRAM_IDS**: Telegram ID авторизованных пользователей
 
-### 4. Запуск ботов
+### 4. Запуск сервисов
+
+#### Node.js сервис генерации карточек (рекомендуется запустить первым)
+```bash
+npm start
+# или для разработки с автоматической перезагрузкой
+npm run dev
+```
 
 #### Основной бот
 ```bash
@@ -59,6 +73,20 @@ python bot.py
 #### Модераторский бот
 ```bash
 python moderator_bot.py
+```
+
+#### Запуск всех сервисов одновременно
+```bash
+# Linux/Mac
+./start-all.sh
+
+# Windows (PowerShell)
+.\start-all.ps1
+
+# Или вручную в отдельных терминалах:
+# Терминал 1: npm start
+# Терминал 2: python bot.py
+# Терминал 3: python moderator_bot.py
 ```
 
 ## Структура проекта
@@ -73,8 +101,13 @@ python moderator_bot.py
 - `moderator_bot.py` - бот для модераторов и блогеров
 - `moderator_config.py` - конфигурация модераторского бота
 
+### Node.js сервис генерации карточек
+- `server.js` - HTTP сервер для генерации изображений
+- `card-generator.js` - логика создания карточек с помощью Canvas API
+- `package.json` - зависимости Node.js
+
 ### Общие файлы
-- `requirements.txt` - зависимости проекта
+- `requirements.txt` - зависимости Python
 - `README.md` - документация
 
 ## Функциональность ботов
@@ -166,10 +199,17 @@ python moderator_bot.py
 
 ## Зависимости
 
+### Python зависимости
 - aiogram==3.13.1 - фреймворк для Telegram ботов
 - aiosqlite==0.20.0 - асинхронная работа с SQLite
 - python-dotenv==1.0.1 - загрузка переменных окружения
 - aiohttp==3.9.1 - HTTP клиент для OpenRouter API
+
+### Node.js зависимости
+- puppeteer==23.0.2 - браузер для генерации изображений из HTML
+- express==4.18.2 - веб-фреймворк для HTTP сервера
+- multer==1.4.5-lts.1 - middleware для загрузки файлов
+- ejs==3.1.10 - шаблонизатор для HTML
 
 ## API интеграции
 
