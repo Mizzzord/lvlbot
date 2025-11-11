@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Определение состояний FSM
 class UserRegistration(StatesGroup):
     waiting_for_language = State()
+    waiting_for_privacy_policy = State()
     waiting_for_name = State()
     waiting_for_birth_date = State()
     waiting_for_height = State()
@@ -184,70 +185,6 @@ async def improve_goal_with_ai(goal: str) -> str:
         logger.error(f"Error calling OpenRouter API: {e}")
         return goal  # Возвращаем оригинальную цель в случае ошибки
 
-async def skip_payment_process(callback: CallbackQuery, state: FSMContext):
-    """Обработка пропуска оплаты (тестовый режим)"""
-    user_id = callback.from_user.id
-
-    # Создаем тестовую подписку на 30 дней
-    current_time = int(datetime.datetime.now().timestamp())
-    test_subscription_end = current_time + (30 * 24 * 60 * 60)  # 30 дней
-
-    # Создаем тестовый платеж в базе данных
-    test_payment = Payment(
-        user_id=user_id,
-        payment_id="test_payment_skip",
-        order_id=f"test_{user_id}_{current_time}",
-        amount=0.0,
-        months=1,
-        status=PaymentStatus.PAID,
-        created_at=current_time,
-        paid_at=current_time,
-        currency="RUB",
-        payment_method="TEST",
-        subscription_type="standard"
-    )
-
-    payment_id = await db.save_payment(test_payment)
-
-    # Создаем подписку
-    test_subscription = Subscription(
-        user_id=user_id,
-        payment_id=payment_id,
-        start_date=current_time,
-        end_date=test_subscription_end,
-        months=1,
-        status=SubscriptionStatus.ACTIVE,
-        auto_renew=False,
-        created_at=current_time,
-        updated_at=current_time
-    )
-
-    subscription_id = await db.save_subscription(test_subscription)
-
-    # Активируем подписку пользователя
-    await db.activate_user_subscription(user_id, current_time, test_subscription_end)
-
-    logger.info(f"Тестовая подписка создана для пользователя {user_id}, subscription_id: {subscription_id}")
-
-    # Переходим к созданию карточки игрока
-    await state.set_state(UserRegistration.waiting_for_player_photo)
-
-    await callback.message.edit_text(
-        f"🧪 <b>Тестовый режим активирован!</b>\n\n"
-        f"✅ Бесплатная подписка на 30 дней активирована!\n\n"
-        f"📅 Дата окончания: {datetime.datetime.fromtimestamp(test_subscription_end).strftime('%d.%m.%Y')}\n\n"
-        f"🎮 <b>Обязательный этап: Создание карточки игрока</b>\n\n"
-        f"📸 Пожалуйста, загрузите ваше фото для создания игровой карточки.\n"
-        f"ИИ проанализирует ваше фото и определит стартовые характеристики:\n"
-        f"• 💪 Сила\n"
-        f"• 🤸 Ловкость\n"
-        f"• 🏃 Выносливость\n"
-        f"• 🧠 Интеллект (базовый: 50/100)\n"
-        f"• ✨ Харизма (базовый: 50/100)\n\n"
-        f"После анализа будет создана ваша уникальная игровая карточка!",
-        parse_mode="HTML",
-        reply_markup=None
-    )
 
 async def show_main_menu(message: Message):
     """Показать главное меню пользователя"""
@@ -548,13 +485,6 @@ def create_subscription_keyboard() -> InlineKeyboardMarkup:
             )
         ])
 
-    # Добавляем кнопку "Пропустить оплату" (для тестирования)
-    keyboard.append([
-        InlineKeyboardButton(
-            text="⏭️ Пропустить оплату (тест)",
-            callback_data="skip_payment"
-        )
-    ])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -651,8 +581,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 f"{referral_text}"
                 f"{goal_text}"
                 f"{subscription_text}"
-                f"{stats_text}\n"
-                f"Готов продолжить путь к целям? Используй /update для обновления данных.",
+                f"{stats_text}\n",
                 parse_mode="HTML"
             )
     else:
@@ -692,11 +621,45 @@ async def process_language(message: Message, state: FSMContext):
     user.language = language_code
     await db.save_user(user)
 
-    await state.set_state(UserRegistration.waiting_for_name)
+    await state.set_state(UserRegistration.waiting_for_privacy_policy)
     await message.answer(
         f"Отлично! Вы выбрали язык: {get_language_emoji(language_code)}\n\n"
+        "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
+        "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
+        "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
+        "И нашей политикой обработки персональных данных:\n"
+        "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
+        "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
+        ])
+    )
+
+@router.callback_query(lambda c: c.data == "privacy_confirmed")
+async def handle_privacy_confirmed(callback: CallbackQuery, state: FSMContext):
+    """Обработка подтверждения политики конфиденциальности"""
+    await callback.answer()
+
+    await state.set_state(UserRegistration.waiting_for_name)
+    await callback.message.answer(
+        "✅ Спасибо за подтверждение!\n\n"
         "Теперь введите ваше имя:",
         reply_markup=create_cancel_keyboard()
+    )
+
+@router.callback_query(lambda c: c.data == "privacy_declined")
+async def handle_privacy_declined(callback: CallbackQuery, state: FSMContext):
+    """Обработка отказа от политики конфиденциальности"""
+    await callback.answer()
+    await state.clear()
+
+    await callback.message.edit_text(
+        "❌ Регистрация отменена.\n\n"
+        "Без согласия с политикой конфиденциальности регистрация невозможна.\n\n"
+        "Вы можете начать заново командой /start",
+        reply_markup=None
     )
 
 @router.message(Command("cancel"))
@@ -713,30 +676,6 @@ async def cmd_cancel(message: Message, state: FSMContext):
     else:
         await message.answer("Нет активной регистрации для отмены.")
 
-@router.message(Command("update"))
-async def cmd_update(message: Message, state: FSMContext):
-    """Обработчик команды обновления данных"""
-    telegram_id = message.from_user.id
-    existing_user = await db.get_user(telegram_id)
-
-    if existing_user:
-        # Если язык еще не выбран, начинаем с выбора языка
-        if not existing_user.language:
-            await state.set_state(UserRegistration.waiting_for_language)
-            await message.answer(
-                "Давайте обновим ваши данные.\n"
-                "Для начала выберите удобный язык:",
-                reply_markup=create_language_keyboard()
-            )
-        else:
-            await state.set_state(UserRegistration.waiting_for_name)
-            await message.answer(
-                "Давайте обновим ваши данные.\n\n"
-                "Введите ваше имя:",
-                reply_markup=create_cancel_keyboard()
-            )
-    else:
-        await message.answer("Сначала зарегистрируйтесь с помощью /start")
 
 @router.message(UserRegistration.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
@@ -1080,15 +1019,10 @@ async def finalize_registration(message: Message, state: FSMContext, user_id: in
     # Переходим к выбору подписки
     await state.set_state(UserRegistration.waiting_for_subscription)
 
-@router.callback_query(UserRegistration.waiting_for_subscription)
+@router.callback_query(lambda c: c.data.startswith("sub_"))
 async def process_subscription_choice(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора периода подписки"""
     await callback.answer()
-
-    # Проверяем, если это пропуск оплаты
-    if callback.data == "skip_payment":
-        await skip_payment_process(callback, state)
-        return
 
     # Получаем выбранный период из callback_data (sub_1, sub_3, etc.)
     months = int(callback.data.replace("sub_", ""))
@@ -1136,7 +1070,7 @@ async def process_subscription_choice(callback: CallbackQuery, state: FSMContext
         payment_db_id = await db.save_payment(payment)
 
         # Отправляем пользователю ссылку на оплату
-        await callback.message.edit_text(
+        await callback.message.answer(
             f"💳 Подписка на {plan['description']}\n"
             f"💰 Стоимость: {plan['price']} ₽\n\n"
             f"Ссылка для оплаты: {payment_link}\n\n"
@@ -1153,7 +1087,7 @@ async def process_subscription_choice(callback: CallbackQuery, state: FSMContext
 
     else:
         logger.error(f"Не удалось создать платеж для пользователя {user_id}")
-        await callback.message.edit_text(
+        await callback.message.answer(
             "❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.",
             reply_markup=None
         )
@@ -1205,9 +1139,22 @@ async def check_payment_callback(callback: CallbackQuery, state: FSMContext):
             current_time = int(datetime.datetime.now().timestamp())
             await db.update_payment_status(payment.id, "paid", current_time)
 
-            # Создаем подписку
+            # Получаем текущего пользователя для проверки активной подписки
+            user = await db.get_user(payment.user_id)
+
+            # Создаем подписку с учетом активной подписки (суммируем время)
             subscription_start = current_time
-            subscription_end = subscription_start + (payment.months * 30 * 24 * 60 * 60)  # Примерно в секундах
+
+            # Базовое время новой подписки
+            new_subscription_duration = payment.months * 30 * 24 * 60 * 60  # Примерно в секундах
+
+            # Если есть активная подписка, добавляем оставшееся время
+            if user and user.subscription_active and user.subscription_end and user.subscription_end > current_time:
+                remaining_time = user.subscription_end - current_time
+                subscription_end = subscription_start + new_subscription_duration + remaining_time
+                logger.info(f"Суммируем подписку: {remaining_time} сек осталось + {new_subscription_duration} сек новой = {subscription_end - subscription_start} сек")
+            else:
+                subscription_end = subscription_start + new_subscription_duration
 
             subscription = Subscription(
                 user_id=payment.user_id,
@@ -1999,7 +1946,7 @@ async def handle_payment_info(callback: CallbackQuery, state: FSMContext):
     user = await db.get_user(user_id)
 
     if not user or not user.subscription_active or not user.subscription_end:
-        await callback.message.edit_text(
+        await callback.message.answer(
             "💳 <b>Информация об оплате</b>\n\n"
             "❌ <b>Подписка не активна</b>\n\n"
             "Для доступа ко всем функциям оформите подписку.",
@@ -2022,15 +1969,14 @@ async def handle_payment_info(callback: CallbackQuery, state: FSMContext):
         days_left = time_left // (24 * 60 * 60)
         status = f"✅ Активна ({days_left} дней)"
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         f"💳 <b>Информация об оплате</b>\n\n"
         f"📅 <b>Статус подписки:</b> {status}\n"
         f"🎯 <b>Доступ:</b> Все функции активны\n\n"
         f"Хотите продлить подписку?",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💰 Продлить подписку", callback_data="subscribe")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+            [InlineKeyboardButton(text="💰 Продлить подписку", callback_data="subscribe")]
         ])
     )
 
@@ -2039,7 +1985,7 @@ async def handle_change_goal(callback: CallbackQuery, state: FSMContext):
     """Обработка смены цели"""
     await callback.answer()
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         "🎯 <b>Смена цели</b>\n\n"
         "Расскажите о вашей новой цели:\n\n"
         "<i>ИИ поможет сформулировать её правильно.</i>",
@@ -2122,7 +2068,7 @@ async def handle_subscribe(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
     # Возвращаемся к выбору подписки
-    await callback.message.edit_text(
+    await callback.message.answer(
         "💰 <b>Выберите план подписки</b>\n\n"
         "Все планы дают полный доступ ко всем функциям бота:",
         parse_mode="HTML",
@@ -2131,7 +2077,6 @@ async def handle_subscribe(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="3 месяца - 1200 ₽", callback_data="sub_3")],
             [InlineKeyboardButton(text="6 месяцев - 2200 ₽", callback_data="sub_6")],
             [InlineKeyboardButton(text="12 месяцев - 4000 ₽", callback_data="sub_12")],
-            [InlineKeyboardButton(text="⏭️ Пропустить оплату (тест)", callback_data="skip_payment")],
             [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
         ])
     )
@@ -2191,7 +2136,6 @@ async def cmd_help(message: Message):
         "Я — твой личный мотивационный помощник! Помогаю достигать целей через ежедневные задания.\n\n"
         "📋 <b>Команды:</b>\n"
         "/start - Начать регистрацию или проверить статус\n"
-        "/update - Обновить свои данные\n"
         "/cancel - Отменить текущую регистрацию\n"
         "/help - Показать эту справку\n\n"
         "📝 <b>Что собирает бот для персонализации:</b>\n"
@@ -2240,8 +2184,22 @@ async def payment_polling_task():
                     await db.update_payment_status(payment.id, "paid", current_time)
 
                     # Создаем подписку
+                    # Получаем текущего пользователя для проверки активной подписки
+                    user = await db.get_user(payment.user_id)
+
+                    # Создаем подписку с учетом активной подписки (суммируем время)
                     subscription_start = current_time
-                    subscription_end = subscription_start + (payment.months * 30 * 24 * 60 * 60)  # Примерно в секундах
+
+                    # Базовое время новой подписки
+                    new_subscription_duration = payment.months * 30 * 24 * 60 * 60  # Примерно в секундах
+
+                    # Если есть активная подписка, добавляем оставшееся время
+                    if user and user.subscription_active and user.subscription_end and user.subscription_end > current_time:
+                        remaining_time = user.subscription_end - current_time
+                        subscription_end = subscription_start + new_subscription_duration + remaining_time
+                        logger.info(f"Суммируем подписку: {remaining_time} сек осталось + {new_subscription_duration} сек новой = {subscription_end - subscription_start} сек")
+                    else:
+                        subscription_end = subscription_start + new_subscription_duration
 
                     subscription = Subscription(
                         user_id=payment.user_id,
