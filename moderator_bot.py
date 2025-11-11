@@ -118,6 +118,9 @@ class PrizeManagementStates(StatesGroup):
     editing_prize_emoji = State()
     confirming_prize_edit = State()
 
+class UserSearchStates(StatesGroup):
+    waiting_for_user_id = State()
+
 def create_admin_keyboard() -> ReplyKeyboardMarkup:
     """Создание клавиатуры для главного модератора"""
     keyboard = [
@@ -725,98 +728,91 @@ async def handle_admin_bloggers(message: Message):
 
     await message.answer(text, reply_markup=keyboard)
 
-# Обработчики для блогеров
-
+# Общий обработчик для управления призами
 @dp.message(F.text == "🎁 Управление призами")
-async def handle_blogger_prizes(message: Message):
-    """Управление призами блогера"""
+async def handle_prize_management(message: Message):
+    """Управление призами - перенаправление в зависимости от роли"""
+    logger.info(f"🎯 DEBUG: handle_prize_management вызвана для сообщения: '{message.text}'")
     user_id = message.from_user.id
-    logger.info(f"=== Вызвана функция handle_blogger_prizes для пользователя {user_id} ===")
-    logger.info(f"Текст сообщения: '{message.text}'")
-
     role = await get_user_role(user_id)
     logger.info(f"Роль пользователя {user_id}: {role}")
 
-    if role != ModeratorRole.BLOGGER:
-        logger.warning(f"Пользователь {user_id} с ролью {role} попытался получить доступ к функциям блогера")
-        await message.answer("❌ У вас нет доступа к этой функции.")
-        return
+    if role == ModeratorRole.ADMIN:
+        # Админ - показываем все призы
+        logger.info(f"=== Перенаправление админа {user_id} в управление призами ===")
 
-    # Получаем реферальный код блогера
-    logger.info(f"Получаем данные блогера для пользователя {user_id}")
-    blogger = await db.get_blogger_by_telegram_id(user_id)
-    logger.info(f"Результат get_blogger_by_telegram_id для {user_id}: {blogger}")
+        # Получаем все призы
+        admin_prizes = await db.get_prizes(prize_type=PrizeType.ADMIN, is_active=True)
+        blogger_prizes = await db.get_prizes(prize_type=PrizeType.BLOGGER, is_active=True)
 
-    if not blogger:
-        logger.error(f"Блогер {user_id} не найден в базе данных")
-        await message.answer("❌ Вы не зарегистрированы как блогер.")
-        return
+        text = "🎁 <b>Управление призами</b>\n\n"
 
-    referral_code = blogger['referral_code']
+        text += f"👑 <b>Призы главного модератора:</b> {len(admin_prizes)}\n"
+        for prize in admin_prizes[:5]:  # Показываем первые 5
+            text += f"• {prize.emoji} {prize.title} (ID: {prize.id})\n"
+        if len(admin_prizes) > 5:
+            text += f"... и еще {len(admin_prizes) - 5} призов\n"
 
-    # Получаем призы блогера
-    blogger_prizes = await db.get_prizes(referral_code=referral_code, is_active=True)
+        text += f"\n📣 <b>Призы блогеров:</b> {len(blogger_prizes)}\n"
+        for prize in blogger_prizes[:5]:  # Показываем первые 5
+            text += f"• {prize.emoji} {prize.title} (Блогер: {prize.referral_code}, ID: {prize.id})\n"
+        if len(blogger_prizes) > 5:
+            text += f"... и еще {len(blogger_prizes) - 5} призов\n"
 
-    text = "🎁 <b>Управление вашими призами</b>\n\n"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать новый приз", callback_data="create_prize_admin")],
+            [InlineKeyboardButton(text="📝 Редактировать приз", callback_data="edit_prize")],
+            [InlineKeyboardButton(text="🗑️ Удалить приз", callback_data="delete_prize")],
+            [InlineKeyboardButton(text="👁️ Просмотреть все", callback_data="view_all_prizes")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+        ])
 
-    if blogger_prizes:
-        text += f"📊 <b>Найдено призов:</b> {len(blogger_prizes)}\n\n"
-        for prize in blogger_prizes:
-            text += f"{prize.emoji} <b>{prize.title}</b>\n"
-            if prize.description:
-                text += f"   └ {prize.description}\n"
-            text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
-            text += f"   └ ID: {prize.id}\n\n"
+        await message.answer(text, reply_markup=keyboard)
+
+    elif role == ModeratorRole.BLOGGER:
+        # Блогер - показываем только свои призы
+        logger.info(f"=== Перенаправление блогера {user_id} в управление призами ===")
+
+        # Получаем реферальный код блогера
+        blogger = await db.get_blogger_by_telegram_id(user_id)
+        logger.info(f"Результат get_blogger_by_telegram_id для {user_id}: {blogger}")
+
+        if not blogger:
+            logger.error(f"Блогер {user_id} не найден в базе данных")
+            await message.answer("❌ Вы не зарегистрированы как блогер.")
+            return
+
+        referral_code = blogger['referral_code']
+
+        # Получаем призы блогера
+        blogger_prizes = await db.get_prizes(referral_code=referral_code, is_active=True)
+
+        text = "🎁 <b>Управление вашими призами</b>\n\n"
+
+        if blogger_prizes:
+            text += f"📊 <b>Найдено призов:</b> {len(blogger_prizes)}\n\n"
+            for prize in blogger_prizes:
+                text += f"{prize.emoji} <b>{prize.title}</b>\n"
+                if prize.description:
+                    text += f"   └ {prize.description}\n"
+                text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
+                text += f"   └ ID: {prize.id}\n\n"
+        else:
+            text += "У вас пока нет созданных призов.\nИспользуйте кнопку '➕ Создать приз' для создания первого приза."
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать приз", callback_data="create_blogger_prize")],
+            [InlineKeyboardButton(text="✏️ Редактировать призы", callback_data="edit_blogger_prize")],
+            [InlineKeyboardButton(text="🗑️ Удалить приз", callback_data="delete_blogger_prize")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_blogger_menu")]
+        ])
+
+        await message.answer(text, reply_markup=keyboard)
+
     else:
-        text += "У вас пока нет созданных призов.\nИспользуйте кнопку '➕ Создать приз' для создания первого приза."
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать приз", callback_data="create_blogger_prize")],
-        [InlineKeyboardButton(text="✏️ Редактировать призы", callback_data="edit_blogger_prize")],
-        [InlineKeyboardButton(text="🗑️ Удалить приз", callback_data="delete_blogger_prize")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_blogger_menu")]
-    ])
-
-    await message.answer(text, reply_markup=keyboard)
-
-# Обработчики для главного модератора
-
-@dp.message(F.text == "🎁 Управление призами")
-async def handle_admin_prizes(message: Message):
-    """Управление призами для главного модератора"""
-    user_id = message.from_user.id
-
-    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        # Неизвестная роль
+        logger.warning(f"Пользователь {user_id} с неизвестной ролью {role} попытался получить доступ к управлению призами")
         await message.answer("❌ У вас нет доступа к этой функции.")
-        return
-
-    # Получаем все призы
-    admin_prizes = await db.get_prizes(prize_type=PrizeType.ADMIN, is_active=True)
-    blogger_prizes = await db.get_prizes(prize_type=PrizeType.BLOGGER, is_active=True)
-
-    text = "🎁 <b>Управление призами</b>\n\n"
-
-    text += f"👑 <b>Призы главного модератора:</b> {len(admin_prizes)}\n"
-    for prize in admin_prizes[:5]:  # Показываем первые 5
-        text += f"• {prize.emoji} {prize.title} (ID: {prize.id})\n"
-    if len(admin_prizes) > 5:
-        text += f"... и еще {len(admin_prizes) - 5} призов\n"
-
-    text += f"\n📣 <b>Призы блогеров:</b> {len(blogger_prizes)}\n"
-    for prize in blogger_prizes[:5]:  # Показываем первые 5
-        text += f"• {prize.emoji} {prize.title} (Блогер: {prize.referral_code}, ID: {prize.id})\n"
-    if len(blogger_prizes) > 5:
-        text += f"... и еще {len(blogger_prizes) - 5} призов\n"
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать новый приз", callback_data="create_prize_admin")],
-        [InlineKeyboardButton(text="📝 Редактировать приз", callback_data="edit_prize")],
-        [InlineKeyboardButton(text="🗑️ Удалить приз", callback_data="delete_prize")],
-        [InlineKeyboardButton(text="👁️ Просмотреть все", callback_data="view_all_prizes")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
-    ])
-
-    await message.answer(text, reply_markup=keyboard)
 
 @dp.message(F.text == "👥 Статистика пользователей")
 async def handle_admin_users(message: Message):
@@ -838,12 +834,98 @@ async def handle_admin_users(message: Message):
     text += f"🎯 <b>Выполнено заданий:</b> {total_tasks}\n"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📈 Детальная статистика", callback_data="detailed_stats")],
-        [InlineKeyboardButton(text="🏆 Топ пользователей", callback_data="top_users")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
     ])
 
     await message.answer(text, reply_markup=keyboard)
+
+@dp.message(F.text == "🔍 Поиск пользователя")
+async def handle_admin_user_search(message: Message, state: FSMContext):
+    """Поиск пользователя по Telegram ID для главного модератора"""
+    user_id = message.from_user.id
+
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    text = "🔍 <b>Поиск пользователя</b>\n\n"
+    text += "Введите Telegram ID пользователя для поиска:"
+
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+    ]))
+
+    await state.set_state(UserSearchStates.waiting_for_user_id)
+
+@dp.message(UserSearchStates.waiting_for_user_id)
+async def handle_user_id_input(message: Message, state: FSMContext):
+    """Обработка введенного Telegram ID для поиска пользователя"""
+    user_id = message.from_user.id
+
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+
+    try:
+        search_user_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Неверный формат Telegram ID. Введите число.",
+                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                               [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+                           ]))
+        return
+
+    # Ищем пользователя в базе данных
+    user_stats = await db.get_user_stats(search_user_id)
+    user_info = await db.get_user(search_user_id)
+
+    if not user_info and not user_stats:
+        await message.answer(f"❌ Пользователь с Telegram ID {search_user_id} не найден в системе.",
+                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                               [InlineKeyboardButton(text="🔍 Искать другого", callback_data="search_another_user")],
+                               [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+                           ]))
+        await state.clear()
+        return
+
+    # Формируем информацию о пользователе
+    text = f"🔍 <b>Информация о пользователе</b>\n\n"
+    text += f"🆔 <b>Telegram ID:</b> {search_user_id}\n"
+
+    if user_info:
+        text += f"👤 <b>Имя:</b> {user_info.name or 'Не указано'}\n"
+        text += f"🏙️ <b>Город:</b> {user_info.city or 'Не указан'}\n"
+        text += f"🎯 <b>Цель:</b> {user_info.goal or 'Не указана'}\n"
+        text += f"🔗 <b>Реферальный код:</b> {user_info.referral_code or 'Нет'}\n"
+        text += f"👥 <b>Приглашенных:</b> {user_info.referral_count}\n"
+
+        if user_info.subscription_active:
+            text += f"✅ <b>Подписка:</b> Активна\n"
+            if user_info.subscription_end:
+                import time
+                end_date = time.strftime('%d.%m.%Y', time.localtime(user_info.subscription_end))
+                text += f"📅 <b>Истекает:</b> {end_date}\n"
+        else:
+            text += f"❌ <b>Подписка:</b> Неактивна\n"
+
+    if user_stats:
+        text += f"\n📊 <b>Статистика:</b>\n"
+        text += f"⭐ <b>Уровень:</b> {user_stats.level}\n"
+        text += f"⚡ <b>Опыт:</b> {user_stats.experience}\n"
+        text += f"🎯 <b>Выполнено заданий:</b> {user_stats.total_tasks_completed}\n"
+        text += f"🔥 <b>Текущий стрик:</b> {user_stats.current_streak} дней\n"
+        text += f"🏆 <b>Лучший стрик:</b> {user_stats.best_streak} дней\n"
+        text += f"🎖️ <b>Ранг:</b> {user_stats.rank.value if user_stats.rank else 'Не определен'}\n"
+
+        if user_stats.referral_rank:
+            text += f"👥 <b>Реферальный ранг:</b> {user_stats.referral_rank.value}\n"
+
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Искать другого", callback_data="search_another_user")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+    ]))
+
+    await state.clear()
 
 @dp.message(F.text == "📊 Общая статистика")
 async def handle_admin_general_stats(message: Message):
@@ -1540,6 +1622,24 @@ async def handle_admin_callbacks(callback: CallbackQuery):
         await handle_admin_general_stats(callback.message)
     else:
         await callback.message.answer("Функция в разработке")
+
+@dp.callback_query(lambda c: c.data == "search_another_user")
+async def handle_search_another_user(callback: CallbackQuery, state: FSMContext):
+    """Перезапуск поиска пользователя"""
+    await callback.answer()
+
+    user_id = callback.from_user.id
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        return
+
+    text = "🔍 <b>Поиск пользователя</b>\n\n"
+    text += "Введите Telegram ID пользователя для поиска:"
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+    ]))
+
+    await state.set_state(UserSearchStates.waiting_for_user_id)
 
 @dp.callback_query(lambda c: c.data.startswith("blogger_"))
 async def handle_blogger_callbacks(callback: CallbackQuery):
