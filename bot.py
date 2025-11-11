@@ -2209,13 +2209,47 @@ async def payment_polling_task():
             logger.error(f"[payment_polling_task] Error: {e}")
             await asyncio.sleep(60)
 
+async def notification_sender_task():
+    """Фоновая задача отправки уведомлений пользователям"""
+    logger.info("Запущена задача отправки уведомлений")
+
+    while True:
+        try:
+            # Получаем неотправленные уведомления
+            notifications = await db.get_unsent_notifications(limit=10)
+
+            for notification in notifications:
+                try:
+                    # Отправляем уведомление пользователю
+                    await bot.send_message(
+                        chat_id=notification['user_id'],
+                        text=f"{notification['title']}\n\n{notification['message']}",
+                        parse_mode="HTML"
+                    )
+
+                    # Отмечаем уведомление как отправленное
+                    await db.mark_notification_sent(notification['id'])
+                    logger.info(f"Уведомление {notification['id']} отправлено пользователю {notification['user_id']}")
+
+                except Exception as e:
+                    logger.error(f"Не удалось отправить уведомление {notification['id']} пользователю {notification['user_id']}: {e}")
+
+            # Проверяем каждые 30 секунд
+            await asyncio.sleep(30)
+
+        except Exception as e:
+            logger.error(f"[notification_sender_task] Error: {e}")
+            await asyncio.sleep(60)  # При ошибке ждем минуту
+
 async def on_startup():
     """Функция, выполняемая при запуске бота"""
     await db.init_db()
     # Запускаем фоновую задачу проверки платежей
     asyncio.create_task(payment_polling_task())
+    # Запускаем фоновую задачу отправки уведомлений
+    asyncio.create_task(notification_sender_task())
     logger.info("Бот запущен и готов к работе")
-    logger.info("Зарегистрированные handlers: check_payment_callback")
+    logger.info("Зарегистрированные handlers: check_payment_callback, notification_sender_task")
 
 async def on_shutdown():
     """Функция, выполняемая при остановке бота"""

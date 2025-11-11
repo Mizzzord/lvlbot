@@ -1,6 +1,7 @@
 import aiosqlite
 import datetime
 import logging
+import os
 from datetime import date
 from typing import Optional
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
@@ -142,6 +143,55 @@ class Database:
                 )
             ''')
 
+            # Создаем таблицу уведомлений
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    type TEXT NOT NULL, -- 'task_approved', 'task_rejected', 'payment_confirmed' и т.д.
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    data TEXT, -- JSON с дополнительными данными
+                    is_sent BOOLEAN DEFAULT FALSE,
+                    created_at INTEGER NOT NULL,
+                    sent_at INTEGER
+                )
+            ''')
+
+            # Индекс для быстрого поиска неотправленных уведомлений
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_notifications_unsent
+                ON notifications(user_id, is_sent)
+            ''')
+
+            # Создаем таблицу модераторов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS moderators (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER UNIQUE NOT NULL,
+                    username TEXT,
+                    full_name TEXT,
+                    role TEXT DEFAULT 'moderator',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            ''')
+
+            # Создаем таблицу блогеров
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bloggers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER UNIQUE NOT NULL,
+                    username TEXT,
+                    full_name TEXT,
+                    referral_code TEXT UNIQUE NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            ''')
+
             # Создаем индексы для производительности
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)')
@@ -153,6 +203,9 @@ class Database:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_stats_rank ON user_stats(rank)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_prizes_type ON prizes(prize_type)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_prizes_referral_code ON prizes(referral_code)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_moderators_telegram_id ON moderators(telegram_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_bloggers_telegram_id ON bloggers(telegram_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_bloggers_referral_code ON bloggers(referral_code)')
 
             # Добавляем недостающие колонки для существующих баз данных
             await self._add_missing_columns(db)
@@ -1145,3 +1198,575 @@ class Database:
             if deleted:
                 logger.info(f"Приз с ID {prize_id} удален")
             return deleted
+
+    # Методы для модераторского бота
+
+    async def get_total_users_count(self) -> int:
+        """Получение общего количества пользователей"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('SELECT COUNT(*) FROM users')
+            result = await cursor.fetchone()
+            return result[0] if result else 0
+
+    async def get_active_users_count(self) -> int:
+        """Получение количества пользователей с активной подпиской"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('SELECT COUNT(*) FROM users WHERE subscription_active = 1')
+            result = await cursor.fetchone()
+            return result[0] if result else 0
+
+    async def get_total_completed_tasks(self) -> int:
+        """Получение общего количества выполненных заданий"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('SELECT SUM(total_tasks_completed) FROM user_stats')
+            result = await cursor.fetchone()
+            return result[0] if result and result[0] else 0
+
+    async def get_users_by_city_stats(self) -> list[tuple]:
+        """Статистика пользователей по городам"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT u.city, COUNT(*) as count
+                FROM users u
+                JOIN user_stats us ON u.telegram_id = us.user_id
+                WHERE u.city IS NOT NULL AND u.city != ''
+                GROUP BY u.city
+                ORDER BY count DESC
+                LIMIT 20
+            ''')
+            rows = await cursor.fetchall()
+            return [(row[0], row[1]) for row in rows]
+
+    async def get_users_by_rank_stats(self) -> list[tuple]:
+        """Статистика пользователей по рангам"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT us.rank, COUNT(*) as count
+                FROM user_stats us
+                GROUP BY us.rank
+                ORDER BY count DESC
+            ''')
+            rows = await cursor.fetchall()
+            return [(row[0], row[1]) for row in rows]
+
+    async def get_users_by_referral_code_stats(self, referral_code: str) -> list[tuple]:
+        """Получение статистики подписчиков блогера"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT u.name, us.level, us.experience, us.rank
+                FROM users u
+                JOIN user_stats us ON u.telegram_id = us.user_id
+                WHERE u.referral_code = ? AND u.subscription_active = 1
+                ORDER BY us.level DESC, us.experience DESC
+                LIMIT 50
+            ''', (referral_code,))
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3]) for row in rows]
+
+    # Методы для модерации заданий
+
+    async def get_pending_tasks_for_moderation(self, limit: int = 50) -> list[tuple]:
+        """Получение заданий, ожидающих модерации"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT dt.id, dt.user_id, dt.task_description, dt.submitted_media_path,
+                       u.name, ps.nickname
+                FROM daily_tasks dt
+                JOIN users u ON dt.user_id = u.telegram_id
+                LEFT JOIN player_stats ps ON dt.user_id = ps.user_id
+                WHERE dt.status = 'submitted'
+                ORDER BY dt.created_at ASC
+                LIMIT ?
+            ''', (limit,))
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in rows]
+
+    async def get_task_details(self, task_id: int) -> Optional[dict]:
+        """Получение детальной информации о задании"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT dt.*, u.name, ps.nickname, ps.photo_path
+                FROM daily_tasks dt
+                JOIN users u ON dt.user_id = u.telegram_id
+                LEFT JOIN player_stats ps ON dt.user_id = ps.user_id
+                WHERE dt.id = ?
+            ''', (task_id,))
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
+    async def approve_task(self, task_id: int, moderator_id: int, experience_reward: int = 10,
+                          stat_rewards: dict = None) -> bool:
+        """Одобрение задания с начислением наград"""
+        if stat_rewards is None:
+            stat_rewards = {'strength': 0, 'agility': 0, 'endurance': 0, 'intelligence': 0, 'charisma': 0}
+
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                # Получаем информацию о задании
+                cursor = await db.execute('SELECT user_id, submitted_media_path FROM daily_tasks WHERE id = ?', (task_id,))
+                task_row = await cursor.fetchone()
+                if not task_row:
+                    return False
+
+                user_id = task_row[0]
+                media_path = task_row[1]
+
+                # Обновляем статус задания
+                await db.execute('''
+                    UPDATE daily_tasks
+                    SET status = 'approved', completed_at = ?, moderator_comment = ?
+                    WHERE id = ?
+                ''', (int(datetime.datetime.now().timestamp()), f"Одобрено модератором {moderator_id}", task_id))
+
+                # Начисляем опыт пользователю
+                await db.execute('''
+                    UPDATE user_stats
+                    SET experience = experience + ?, total_tasks_completed = total_tasks_completed + 1
+                    WHERE user_id = ?
+                ''', (experience_reward, user_id))
+
+                # Начисляем характеристики игроку
+                await db.execute('''
+                    UPDATE player_stats
+                    SET strength = strength + ?,
+                        agility = agility + ?,
+                        endurance = endurance + ?,
+                        intelligence = intelligence + ?,
+                        charisma = charisma + ?,
+                        experience = experience + ?
+                    WHERE user_id = ?
+                ''', (
+                    stat_rewards.get('strength', 0),
+                    stat_rewards.get('agility', 0),
+                    stat_rewards.get('endurance', 0),
+                    stat_rewards.get('intelligence', 0),
+                    stat_rewards.get('charisma', 0),
+                    experience_reward,
+                    user_id
+                ))
+
+                # Обновляем уровень пользователя на основе нового опыта
+                await self._update_user_level(user_id, db)
+
+                await db.commit()
+
+                # Отправляем уведомление пользователю (после commit)
+                await self.send_task_result_notification(task_id, True, experience_reward, stat_rewards)
+
+                # Удаляем медиафайл для экономии места на сервере
+                if media_path:
+                    self._delete_task_media_file(media_path)
+
+                logger.info(f"Задание {task_id} одобрено модератором {moderator_id}, начислено опыта: {experience_reward}")
+                return True
+
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка при одобрении задания {task_id}: {e}")
+                return False
+
+    async def reject_task(self, task_id: int, moderator_id: int, reason: str = "") -> bool:
+        """Отклонение задания"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                # Получаем информацию о задании для удаления файла
+                cursor = await db.execute('SELECT submitted_media_path FROM daily_tasks WHERE id = ?', (task_id,))
+                task_row = await cursor.fetchone()
+                media_path = task_row[0] if task_row else None
+
+                await db.execute('''
+                    UPDATE daily_tasks
+                    SET status = 'rejected', moderator_comment = ?
+                    WHERE id = ?
+                ''', (f"Отклонено модератором {moderator_id}: {reason}", task_id))
+
+                await db.commit()
+
+                # Отправляем уведомление пользователю (после commit)
+                await self.send_task_result_notification(task_id, False, reason=reason)
+
+                # Удаляем медиафайл для экономии места на сервере
+                if media_path:
+                    self._delete_task_media_file(media_path)
+
+                logger.info(f"Задание {task_id} отклонено модератором {moderator_id}")
+                return True
+
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка при отклонении задания {task_id}: {e}")
+                return False
+
+    async def _update_user_level(self, user_id: int, db):
+        """Обновление уровня пользователя на основе опыта"""
+        cursor = await db.execute('SELECT experience FROM user_stats WHERE user_id = ?', (user_id,))
+        row = await cursor.fetchone()
+        if row:
+            experience = row[0]
+            new_level = experience // 100 + 1  # Каждый 100 опыта = 1 уровень
+
+            await db.execute('UPDATE user_stats SET level = ? WHERE user_id = ?', (new_level, user_id))
+
+    def _delete_task_media_file(self, media_path: str) -> bool:
+        """Удаление медиафайла задания для экономии места"""
+        if not media_path:
+            return False
+
+        try:
+            if os.path.exists(media_path):
+                os.remove(media_path)
+                logger.info(f"Медиафайл задания удален: {media_path}")
+                return True
+            else:
+                logger.warning(f"Медиафайл не найден для удаления: {media_path}")
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка при удалении медиафайла {media_path}: {e}")
+            return False
+
+    # Методы для работы с уведомлениями
+    async def create_notification(self, user_id: int, notification_type: str, title: str, message: str, data: str = None) -> bool:
+        """Создание уведомления для пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute('''
+                    INSERT INTO notifications (user_id, type, title, message, data, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (user_id, notification_type, title, message, data, int(datetime.datetime.now().timestamp())))
+
+                await db.commit()
+                logger.info(f"Уведомление типа '{notification_type}' создано для пользователя {user_id}")
+                return True
+
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка при создании уведомления для пользователя {user_id}: {e}")
+                return False
+
+    async def get_unsent_notifications(self, user_id: int = None, limit: int = 50) -> list[dict]:
+        """Получение неотправленных уведомлений"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            if user_id:
+                cursor = await db.execute('''
+                    SELECT * FROM notifications
+                    WHERE user_id = ? AND is_sent = FALSE
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                ''', (user_id, limit))
+            else:
+                cursor = await db.execute('''
+                    SELECT * FROM notifications
+                    WHERE is_sent = FALSE
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                ''', (limit,))
+
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def mark_notification_sent(self, notification_id: int) -> bool:
+        """Отметить уведомление как отправленное"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute('''
+                    UPDATE notifications
+                    SET is_sent = TRUE, sent_at = ?
+                    WHERE id = ?
+                ''', (int(datetime.datetime.now().timestamp()), notification_id))
+
+                await db.commit()
+                return True
+
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка при отметке уведомления {notification_id} как отправленного: {e}")
+                return False
+
+    async def send_task_result_notification(self, task_id: int, approved: bool, experience_reward: int = 0,
+                                          stat_rewards: dict = None, reason: str = "") -> bool:
+        """Отправка уведомления о результате проверки задания"""
+        if stat_rewards is None:
+            stat_rewards = {}
+
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                # Получаем информацию о задании и пользователе
+                cursor = await db.execute('''
+                    SELECT dt.user_id, dt.task_description, u.name
+                    FROM daily_tasks dt
+                    JOIN users u ON dt.user_id = u.telegram_id
+                    WHERE dt.id = ?
+                ''', (task_id,))
+                task_info = await cursor.fetchone()
+
+                if not task_info:
+                    logger.error(f"Задание {task_id} не найдено при отправке уведомления")
+                    return False
+
+                user_id, task_desc, user_name = task_info
+
+                if approved:
+                    # Уведомление об одобрении
+                    title = "🎉 Задание одобрено!"
+
+                    # Формируем сообщение с наградами
+                    message = f"✅ <b>Ваше задание было одобрено модератором!</b>\n\n"
+                    message += f"📝 <b>Задание:</b>\n{task_desc}\n\n"
+                    message += f"🎉 <b>Награды:</b>\n"
+                    message += f"⭐ Опыт: +{experience_reward}\n"
+
+                    if any(stat_rewards.values()):
+                        message += "💪 Характеристики:\n"
+                        stat_display_names = {
+                            'strength': '💪 Сила',
+                            'agility': '🤸 Ловкость',
+                            'endurance': '🏃 Выносливость',
+                            'intelligence': '🧠 Интеллект',
+                            'charisma': '✨ Харизма'
+                        }
+                        for stat_name, value in stat_rewards.items():
+                            if value > 0:
+                                message += f"{stat_display_names[stat_name]}: +{value}\n"
+
+                    notification_type = "task_approved"
+                    data = f'{{"experience": {experience_reward}, "stats": {stat_rewards}}}'
+
+                else:
+                    # Уведомление об отклонении
+                    title = "❌ Задание отклонено"
+
+                    message = f"❌ <b>Ваше задание было отклонено модератором</b>\n\n"
+                    message += f"📝 <b>Задание:</b>\n{task_desc}\n\n"
+                    if reason and reason != "Без указания причины":
+                        message += f"📋 <b>Причина:</b>\n{reason}\n\n"
+                    message += "💡 Попробуйте выполнить задание лучше и отправьте снова!"
+
+                    notification_type = "task_rejected"
+                    data = f'{{"reason": "{reason}"}}'
+
+                # Создаем уведомление
+                success = await self.create_notification(user_id, notification_type, title, message, data)
+                if success:
+                    logger.info(f"Уведомление о результате задания {task_id} создано для пользователя {user_id}")
+                return success
+
+            except Exception as e:
+                logger.error(f"Ошибка при создании уведомления о задании {task_id}: {e}")
+                return False
+
+    # Методы для статистики модерации
+    async def get_moderator_stats(self, moderator_id: int) -> dict:
+        """Получение статистики модерации для конкретного модератора"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Статистика за все время
+            cursor = await db.execute('''
+                SELECT COUNT(*) as total_moderated
+                FROM daily_tasks
+                WHERE moderator_comment LIKE ?
+            ''', (f"Одобрено модератором {moderator_id}%",))
+
+            total_row = await cursor.fetchone()
+            total_moderated = total_row[0] if total_row else 0
+
+            # Статистика за сегодня
+            today_start = int(datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            today_end = today_start + 86400  # 24 часа
+
+            cursor = await db.execute('''
+                SELECT COUNT(*) as today_moderated
+                FROM daily_tasks
+                WHERE moderator_comment LIKE ?
+                AND completed_at >= ? AND completed_at < ?
+            ''', (f"Одобрено модератором {moderator_id}%", today_start, today_end))
+
+            today_row = await cursor.fetchone()
+            today_moderated = today_row[0] if today_row else 0
+
+            # Статистика отклоненных заданий за все время
+            cursor = await db.execute('''
+                SELECT COUNT(*) as total_rejected
+                FROM daily_tasks
+                WHERE moderator_comment LIKE ?
+            ''', (f"Отклонено модератором {moderator_id}%",))
+
+            rejected_row = await cursor.fetchone()
+            total_rejected = rejected_row[0] if rejected_row else 0
+
+            # Статистика отклоненных заданий за сегодня
+            cursor = await db.execute('''
+                SELECT COUNT(*) as today_rejected
+                FROM daily_tasks
+                WHERE moderator_comment LIKE ?
+                AND completed_at >= ? AND completed_at < ?
+            ''', (f"Отклонено модератором {moderator_id}%", today_start, today_end))
+
+            today_rejected_row = await cursor.fetchone()
+            today_rejected = today_rejected_row[0] if today_rejected_row else 0
+
+            return {
+                'total_moderated': total_moderated,
+                'today_moderated': today_moderated,
+                'total_rejected': total_rejected,
+                'today_rejected': today_rejected,
+                'total_tasks': total_moderated + total_rejected,
+                'today_tasks': today_moderated + today_rejected
+            }
+
+    # Методы для управления модераторами
+
+    async def add_moderator(self, telegram_id: int, username: str = None, full_name: str = None) -> bool:
+        """Добавление модератора"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                current_time = int(datetime.datetime.now().timestamp())
+                await db.execute('''
+                    INSERT INTO moderators (telegram_id, username, full_name, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_id) DO UPDATE SET
+                        username = excluded.username,
+                        full_name = excluded.full_name,
+                        is_active = 1,
+                        updated_at = excluded.updated_at
+                ''', (telegram_id, username, full_name, current_time, current_time))
+                await db.commit()
+                logger.info(f"Модератор {telegram_id} добавлен/обновлен")
+                return True
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка добавления модератора {telegram_id}: {e}")
+                return False
+
+    async def remove_moderator(self, telegram_id: int) -> bool:
+        """Удаление модератора"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                cursor = await db.execute('DELETE FROM moderators WHERE telegram_id = ?', (telegram_id,))
+                deleted = cursor.rowcount > 0
+                await db.commit()
+                if deleted:
+                    logger.info(f"Модератор {telegram_id} удален")
+                return deleted
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка удаления модератора {telegram_id}: {e}")
+                return False
+
+    async def get_moderators(self, active_only: bool = True) -> list[dict]:
+        """Получение списка модераторов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            query = 'SELECT * FROM moderators'
+            params = []
+
+            if active_only:
+                query += ' WHERE is_active = 1'
+
+            query += ' ORDER BY created_at DESC'
+
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_moderator_by_telegram_id(self, telegram_id: int) -> Optional[dict]:
+        """Получение модератора по Telegram ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM moderators WHERE telegram_id = ?', (telegram_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    # Методы для управления блогерами
+
+    async def add_blogger(self, telegram_id: int, referral_code: str, username: str = None, full_name: str = None) -> bool:
+        """Добавление блогера"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                current_time = int(datetime.datetime.now().timestamp())
+                await db.execute('''
+                    INSERT INTO bloggers (telegram_id, username, full_name, referral_code, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_id) DO UPDATE SET
+                        username = excluded.username,
+                        full_name = excluded.full_name,
+                        referral_code = excluded.referral_code,
+                        is_active = 1,
+                        updated_at = excluded.updated_at
+                ''', (telegram_id, username, full_name, referral_code, current_time, current_time))
+                await db.commit()
+                logger.info(f"Блогер {telegram_id} с реферальным кодом {referral_code} добавлен/обновлен")
+                return True
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка добавления блогера {telegram_id}: {e}")
+                return False
+
+    async def remove_blogger(self, telegram_id: int) -> bool:
+        """Удаление блогера"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                cursor = await db.execute('DELETE FROM bloggers WHERE telegram_id = ?', (telegram_id,))
+                deleted = cursor.rowcount > 0
+                await db.commit()
+                if deleted:
+                    logger.info(f"Блогер {telegram_id} удален")
+                return deleted
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Ошибка удаления блогера {telegram_id}: {e}")
+                return False
+
+    async def get_bloggers(self, active_only: bool = True) -> list[dict]:
+        """Получение списка блогеров"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            query = 'SELECT * FROM bloggers'
+            params = []
+
+            if active_only:
+                query += ' WHERE is_active = 1'
+
+            query += ' ORDER BY created_at DESC'
+
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_blogger_by_telegram_id(self, telegram_id: int) -> Optional[dict]:
+        """Получение блогера по Telegram ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM bloggers WHERE telegram_id = ?', (telegram_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_blogger_by_referral_code(self, referral_code: str) -> Optional[dict]:
+        """Получение блогера по реферальному коду"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM bloggers WHERE referral_code = ? AND is_active = 1', (referral_code,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    # Методы для получения списков ID для авторизации
+
+    async def get_moderator_telegram_ids(self) -> list[int]:
+        """Получение списка Telegram ID модераторов"""
+        moderators = await self.get_moderators(active_only=True)
+        return [m['telegram_id'] for m in moderators]
+
+    async def get_blogger_telegram_ids(self) -> list[int]:
+        """Получение списка Telegram ID блогеров"""
+        bloggers = await self.get_bloggers(active_only=True)
+        return [b['telegram_id'] for b in bloggers]
+
+    async def get_admin_telegram_ids(self) -> list[int]:
+        """Получение списка Telegram ID админов (из конфига)"""
+        # Пока что возвращаем статический список, но можно тоже перенести в БД
+        return [743054320]  # Из moderator_config.py
