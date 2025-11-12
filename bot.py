@@ -20,8 +20,8 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKey
 from config import BOT_TOKEN
 from database import Database
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
-from openrouter_config import (
-    OPENROUTER_API_KEY, OPENROUTER_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT,
+from polza_config import (
+    POLZA_API_KEY, POLZA_BASE_URL, DEFAULT_MODEL, VISION_MODEL, SYSTEM_PROMPT,
     PHOTO_ANALYSIS_PROMPT, TASK_GENERATION_TEMPLATE
 )
 from subscription_config import SUBSCRIPTION_PLANS
@@ -197,23 +197,23 @@ async def improve_goal_with_ai(goal: str) -> str:
             }
 
             headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Authorization": f"Bearer {POLZA_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://t.me/motivation_bot",
                 "X-Title": "Motivation Bot"
             }
 
             async with session.post(
-                f"{OPENROUTER_BASE_URL}/chat/completions",
+                f"{POLZA_BASE_URL}/chat/completions",
                 json=payload,
                 headers=headers
             ) as response:
-                if response.status == 200:
+                if response.status in (200, 201):
                     data = await response.json()
                     improved_goal = data["choices"][0]["message"]["content"].strip()
                     return improved_goal
                 else:
-                    logger.error(f"OpenRouter API error: {response.status}")
+                    logger.error(f"Polza.ai API error: {response.status}")
                     return goal  # Возвращаем оригинальную цель в случае ошибки
 
     except Exception as e:
@@ -258,7 +258,7 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
 
         async with aiohttp.ClientSession(connector=connector) as session:
             payload = {
-                "model": "openrouter/polaris-alpha",  # Используем модель с поддержкой изображений
+                "model": VISION_MODEL,  # Используем модель с поддержкой изображений
                 "messages": [
                     {"role": "system", "content": analysis_prompt},
                     {
@@ -279,18 +279,18 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
             }
 
             headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Authorization": f"Bearer {POLZA_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://t.me/motivation_bot",
                 "X-Title": "Motivation Bot"
             }
 
             async with session.post(
-                f"{OPENROUTER_BASE_URL}/chat/completions",
+                f"{POLZA_BASE_URL}/chat/completions",
                 json=payload,
                 headers=headers
             ) as response:
-                if response.status == 200:
+                if response.status in (200, 201):
                     data = await response.json()
                     result_text = data["choices"][0]["message"]["content"].strip()
 
@@ -314,7 +314,7 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
                         # Возвращаем значения по умолчанию
                         return {'strength': 50, 'agility': 50, 'endurance': 50}
                 else:
-                    logger.error(f"OpenRouter API error: {response.status}")
+                    logger.error(f"Polza.ai API error: {response.status}")
                     return {'strength': 50, 'agility': 50, 'endurance': 50}
 
     except Exception as e:
@@ -352,7 +352,7 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
                 logger.info(f"Node.js response status: {response.status}")
                 logger.info(f"Node.js response headers: {dict(response.headers)}")
 
-                if response.status == 200:
+                if response.status in (200, 201):
                     # Получаем изображение
                     image_data = await response.read()
                     logger.info(f"Получено {len(image_data)} байт от Node.js сервиса")
@@ -2427,6 +2427,68 @@ async def handle_change_photo(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserRegistration.waiting_for_player_photo)
     await state.update_data(is_photo_change=True)
 
+@router.callback_query(lambda c: c.data == "profile")
+async def handle_profile_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработка возврата в профиль из различных состояний"""
+    await callback.answer()
+
+    # Очищаем состояние, если оно было установлено для замены фото
+    await state.clear()
+
+    user_id = callback.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+    player_stats = await db.get_player_stats(user_id)
+    user_statistics = await db.get_user_stats(user_id)
+
+    if not user or not player_stats or not user_statistics:
+        await callback.message.edit_text(
+            "❌ <b>Ошибка загрузки профиля</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+            ])
+        )
+        return
+
+    # Получаем информацию о ранге
+    rank_info = await db.get_user_rank_info(user_id)
+
+    # Формируем текст профиля
+    profile_text = get_profile_text(user, player_stats, user_statistics)
+
+    # Создаем клавиатуру профиля
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="📸 Заменить фотографию", callback_data="change_photo")],
+        [InlineKeyboardButton(text="💳 Подписка", callback_data="subscription")],
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+    ])
+
+    # Если есть фото профиля, показываем его
+    if user.photo_file_id:
+        try:
+            await callback.message.edit_caption(
+                caption=profile_text,
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Ошибка обновления фото профиля: {e}")
+            # Если не удалось обновить caption, отправляем новое сообщение
+            await callback.message.answer(
+                profile_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+    else:
+        await callback.message.edit_text(
+            profile_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
 @router.callback_query(lambda c: c.data == "payment_info")
 async def handle_payment_info(callback: CallbackQuery, state: FSMContext):
     """Обработка информации об оплате"""
@@ -2596,23 +2658,23 @@ async def generate_daily_task(user_goal: str) -> str:
             }
 
             headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Authorization": f"Bearer {POLZA_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://t.me/motivation_bot",
                 "X-Title": "Motivation Bot"
             }
 
             async with session.post(
-                f"{OPENROUTER_BASE_URL}/chat/completions",
+                f"{POLZA_BASE_URL}/chat/completions",
                 json=payload,
                 headers=headers
             ) as response:
-                if response.status == 200:
+                if response.status in (200, 201):
                     data = await response.json()
                     task = data["choices"][0]["message"]["content"].strip()
                     return task
                 else:
-                    logger.error(f"OpenRouter API error: {response.status}")
+                    logger.error(f"Polza.ai API error: {response.status}")
                     return f"Поработать над целью: {user_goal[:50]}..."
 
     except Exception as e:

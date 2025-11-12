@@ -34,7 +34,7 @@ npm install
 Создайте файл `.env` в корневой директории проекта:
 ```env
 BOT_TOKEN=ваш_токен_основного_бота_здесь
-OPENROUTER_API_KEY=ваш_openrouter_api_key_здесь
+POLZA_API_KEY=ваш_polza_api_key_здесь
 ```
 
 #### Для модераторского бота
@@ -53,7 +53,7 @@ MODERATOR_TELEGRAM_IDS=
 
 - **BOT_TOKEN**: получить у [@BotFather](https://t.me/BotFather) в Telegram
 - **MODERATOR_BOT_TOKEN**: отдельный токен для модераторского бота
-- **OPENROUTER_API_KEY**: получить на [openrouter.ai](https://openrouter.ai)
+- **POLZA_API_KEY**: получить на [polza.ai](https://polza.ai)
 - **ADMIN/BLOGGER_TELEGRAM_IDS**: Telegram ID авторизованных пользователей
 
 ### 4. Запуск сервисов
@@ -203,7 +203,7 @@ python moderator_bot.py
 - aiogram==3.13.1 - фреймворк для Telegram ботов
 - aiosqlite==0.20.0 - асинхронная работа с SQLite
 - python-dotenv==1.0.1 - загрузка переменных окружения
-- aiohttp==3.9.1 - HTTP клиент для OpenRouter API
+- aiohttp==3.9.1 - HTTP клиент для Polza.ai API
 
 ### Node.js зависимости
 - puppeteer==23.0.2 - браузер для генерации изображений из HTML
@@ -213,12 +213,12 @@ python moderator_bot.py
 
 ## API интеграции
 
-### OpenRouter API (Основной бот)
-Бот использует OpenRouter API для улучшения формулировок целей с помощью ИИ. Настройки API находятся в файле `openrouter_config.py`:
+### Polza.ai API (Основной бот)
+Бот использует Polza.ai API для улучшения формулировок целей с помощью ИИ. Настройки API находятся в файле `polza_config.py`:
 
-- **Модель**: по умолчанию `openrouter/polaris-alpha` (можно изменить)
+- **Модель**: по умолчанию `google/gemma-3-27b-it` (поддерживает текст и изображения)
 - **Системный промт**: настроен для мотивационных целей
-- **API ключ**: хранится в переменной окружения `OPENROUTER_API_KEY`
+- **API ключ**: хранится в переменной окружения `POLZA_API_KEY`
 
 ### WATA API (Основной бот)
 Бот использует WATA API для обработки платежей. Настройки находятся в файле `subscription_config.py`:

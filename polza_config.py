@@ -3,12 +3,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# OpenRouter API Configuration
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Polza.ai API Configuration
+POLZA_API_KEY = os.getenv("POLZA_API_KEY")
+POLZA_BASE_URL = "https://api.polza.ai/api/v1"
 
 # Model Configuration
-DEFAULT_MODEL = "openrouter/polaris-alpha"  # Можно изменить на другую модель
+DEFAULT_MODEL = "google/gemma-3-27b-it"  # Основная модель для всех задач (текст + изображения)
+VISION_MODEL = "google/gemma-3-27b-it"   # Модель для анализа изображений (поддерживает text + image)
 
 # System Prompt для улучшения целей
 SYSTEM_PROMPT = """
@@ -67,5 +68,5 @@ TASK_GENERATION_TEMPLATE = """
 Верни ТОЛЬКО текст задания в читаемом формате, без упоминания наград или характеристик.
 """
 
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY не найден в переменных окружения")
+if not POLZA_API_KEY:
+    raise ValueError("POLZA_API_KEY не найден в переменных окружения")
