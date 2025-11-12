@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, USE_POSTGRES, DATABASE_PATH
 from database import Database
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
 from polza_config import (
@@ -51,7 +51,7 @@ class UserRegistration(StatesGroup):
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-db = Database()
+db = Database(db_path=DATABASE_PATH, use_postgres=USE_POSTGRES)
 
 # Создание роутера для обработки сообщений
 router = Router()
@@ -637,61 +637,61 @@ async def cmd_start(message: Message, state: FSMContext):
 
         if reg_status['status'] == 'complete':
             # Пользователь полностью зарегистрирован и имеет активную подписку
-            referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
-            goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
+        referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
+        goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
 
-            # Проверяем статус подписки
-            subscription_text = ""
-            if existing_user.subscription_active and existing_user.subscription_end:
-                end_date = datetime.datetime.fromtimestamp(existing_user.subscription_end).strftime('%d.%m.%Y')
-                subscription_text = f"💎 Подписка активна до {end_date}\n"
-            else:
-                subscription_text = "💎 Подписка: Не активна\n"
+        # Проверяем статус подписки
+        subscription_text = ""
+        if existing_user.subscription_active and existing_user.subscription_end:
+            end_date = datetime.datetime.fromtimestamp(existing_user.subscription_end).strftime('%d.%m.%Y')
+            subscription_text = f"💎 Подписка активна до {end_date}\n"
+        else:
+            subscription_text = "💎 Подписка: Не активна\n"
 
-            # Проверяем, есть ли карточка игрока
-            player_stats = await db.get_player_stats(telegram_id)
+        # Проверяем, есть ли карточка игрока
+        player_stats = await db.get_player_stats(telegram_id)
 
+        if player_stats:
+            # У пользователя есть карточка игрока - показываем главное меню
+            user_statistics = await db.get_user_stats(telegram_id)
+            await message.answer(
+                f"С возвращением, {existing_user.name}! 👋\n\n"
+                f"🎮 Ваша игровая карточка активна!\n\n"
+                f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
+                f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
+                f"Готов продолжить приключения?",
+                parse_mode="HTML"
+            )
+            await state.set_state(UserRegistration.main_menu)
+            await show_main_menu(message)
+        else:
+            # У пользователя нет карточки - показываем обычное приветствие
+            stats_text = ""
             if player_stats:
-                # У пользователя есть карточка игрока - показываем главное меню
-                user_statistics = await db.get_user_stats(telegram_id)
-                await message.answer(
-                    f"С возвращением, {existing_user.name}! 👋\n\n"
-                    f"🎮 Ваша игровая карточка активна!\n\n"
-                    f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
-                    f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
-                    f"Готов продолжить приключения?",
-                    parse_mode="HTML"
+                stats_text = (
+                    f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
+                    f"⭐ Опыт: {player_stats.experience}\n\n"
+                    f"🏆 <b>Характеристики:</b>\n"
+                    f"💪 Сила: {player_stats.strength}/100\n"
+                    f"🤸 Ловкость: {player_stats.agility}/100\n"
+                    f"🏃 Выносливость: {player_stats.endurance}/100\n"
+                    f"🧠 Интеллект: {player_stats.intelligence}/100\n"
+                    f"✨ Харизма: {player_stats.charisma}/100\n"
                 )
-                await state.set_state(UserRegistration.main_menu)
-                await show_main_menu(message)
-            else:
-                # У пользователя нет карточки - показываем обычное приветствие
-                stats_text = ""
-                if player_stats:
-                    stats_text = (
-                        f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
-                        f"⭐ Опыт: {player_stats.experience}\n\n"
-                        f"🏆 <b>Характеристики:</b>\n"
-                        f"💪 Сила: {player_stats.strength}/100\n"
-                        f"🤸 Ловкость: {player_stats.agility}/100\n"
-                        f"🏃 Выносливость: {player_stats.endurance}/100\n"
-                        f"🧠 Интеллект: {player_stats.intelligence}/100\n"
-                        f"✨ Харизма: {player_stats.charisma}/100\n"
-                    )
 
-                await message.answer(
-                    f"С возвращением, {existing_user.name}! 👋\n\n"
-                    f"Ты уже в нашей команде изменений!\n\n"
-                    f"👤 Имя: {existing_user.name}\n"
-                    f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
-                    f"📏 Рост: {existing_user.height} см\n"
-                    f"⚖️ Вес: {existing_user.weight} кг\n"
-                    f"🏙️ Город: {existing_user.city}\n"
-                    f"{referral_text}"
-                    f"{goal_text}"
-                    f"{subscription_text}"
-                    f"{stats_text}\n",
-                    parse_mode="HTML"
+            await message.answer(
+                f"С возвращением, {existing_user.name}! 👋\n\n"
+                f"Ты уже в нашей команде изменений!\n\n"
+                f"👤 Имя: {existing_user.name}\n"
+                f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
+                f"📏 Рост: {existing_user.height} см\n"
+                f"⚖️ Вес: {existing_user.weight} кг\n"
+                f"🏙️ Город: {existing_user.city}\n"
+                f"{referral_text}"
+                f"{goal_text}"
+                f"{subscription_text}"
+                f"{stats_text}\n",
+                parse_mode="HTML"
                 )
         elif reg_status['status'] == 'paid_pending':
             # Регистрация завершена, но подписка не оплачена
@@ -2592,6 +2592,155 @@ async def process_goal_change(message: Message, state: FSMContext):
         await message.answer(
             "❌ <b>Ошибка обновления цели</b>\n\n"
             "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML"
+        )
+
+@router.callback_query(lambda c: c.data == "stats")
+async def handle_stats(callback: CallbackQuery, state: FSMContext):
+    """Обработка просмотра статистики"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+    user_stats = await db.get_user_stats(user_id)
+    player_stats = await db.get_player_stats(user_id)
+
+    if not user or not user_stats or not player_stats:
+        await callback.message.edit_text(
+            "❌ <b>Ошибка загрузки статистики</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+            ])
+        )
+        return
+
+    # Получаем информацию о ранге
+    rank_info = await db.get_user_rank_info(user_id)
+
+    # Получаем статистику заданий
+    daily_tasks = await db.get_user_daily_tasks(user_id, limit=30)  # последние 30 дней
+
+    # Подсчитываем статистику заданий
+    completed_tasks = sum(1 for task in daily_tasks if task.status == TaskStatus.COMPLETED)
+    total_tasks = len(daily_tasks)
+    completion_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+
+    # Получаем текущую серию выполнений
+    current_streak = user_stats.current_streak
+
+    # Формируем текст статистики
+    stats_text = (
+        f"📊 <b>Детальная статистика</b>\n\n"
+        f"👤 <b>Игрок:</b> {player_stats.nickname}\n"
+        f"🏆 <b>Опыт:</b> {user_stats.experience} XP\n"
+        f"📈 <b>Уровень:</b> {user_stats.level}\n"
+    )
+
+    if rank_info:
+        stats_text += (
+            f"🏅 <b>Ранг:</b> {rank_info['current_rank_emoji']} {rank_info['current_rank_name']}\n"
+            f"📊 <b>Прогресс ранга:</b> {rank_info['experience_in_rank']}/{rank_info['experience_in_rank'] + rank_info['experience_to_next_rank']} XP\n"
+            f"📈 <b>Прогресс:</b> {rank_info['progress_percentage']:.1f}%\n"
+        )
+    else:
+        stats_text += f"🏅 <b>Ранг:</b> {user_stats.rank.value}\n"
+
+    stats_text += (
+        f"\n🔥 <b>Стрики:</b>\n"
+        f"📅 <b>Текущий:</b> {current_streak} дней\n"
+        f"🏆 <b>Лучший:</b> {user_stats.best_streak} дней\n"
+        f"\n✅ <b>Задания:</b>\n"
+        f"📝 <b>Всего создано:</b> {total_tasks}\n"
+        f"✔️ <b>Выполнено:</b> {completed_tasks}\n"
+        f"📊 <b>Процент выполнения:</b> {completion_rate:.1f}%\n"
+        f"\n🏆 <b>Характеристики:</b>\n"
+        f"💪 <b>Сила:</b> {player_stats.strength}/100\n"
+        f"🤸 <b>Ловкость:</b> {player_stats.agility}/100\n"
+        f"🏃 <b>Выносливость:</b> {player_stats.endurance}/100\n"
+        f"🧠 <b>Интеллект:</b> {player_stats.intelligence}/100\n"
+        f"✨ <b>Харизма:</b> {player_stats.charisma}/100\n"
+    )
+
+    # Создаем клавиатуру
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏅 Рейтинг", callback_data="rating")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+    ])
+
+    await callback.message.edit_text(
+        stats_text,
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+@router.callback_query(lambda c: c.data == "subscription")
+async def handle_subscription(callback: CallbackQuery, state: FSMContext):
+    """Обработка просмотра подписки"""
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+
+    if not user:
+        await callback.message.edit_text(
+            "❌ <b>Ошибка загрузки данных</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+            ])
+        )
+        return
+
+    # Проверяем статус подписки
+    if user.subscription_active and user.subscription_end:
+        from datetime import datetime
+        days_left = (user.subscription_end - datetime.now()).days
+
+        subscription_text = (
+            f"💳 <b>Статус подписки</b>\n\n"
+            f"✅ <b>Подписка активна</b>\n"
+            f"📅 <b>Истекает:</b> {user.subscription_end.strftime('%d.%m.%Y')}\n"
+            f"⏰ <b>Осталось:</b> {days_left} дней\n\n"
+            f"🎁 <b>Преимущества активной подписки:</b>\n"
+            f"• Неограниченное количество заданий\n"
+            f"• Доступ ко всем функциям бота\n"
+            f"• Приоритетная поддержка\n"
+            f"• Детальная статистика прогресса\n"
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="subscribe")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+        ])
+    else:
+        subscription_text = (
+            f"💳 <b>Статус подписки</b>\n\n"
+            f"❌ <b>Подписка не активна</b>\n\n"
+            f"🎁 <b>Преимущества подписки:</b>\n"
+            f"• Неограниченное количество заданий\n"
+            f"• Доступ ко всем функциям бота\n"
+            f"• Приоритетная поддержка\n"
+            f"• Детальная статистика прогресса\n\n"
+            f"💰 <b>Тарифы:</b>\n"
+            f"1 месяц - 200₽\n"
+            f"3 месяца - 1200₽ (400₽/мес)\n"
+            f"6 месяцев - 3000₽ (500₽/мес)\n"
+            f"12 месяцев - 4000₽ (333₽/мес)\n"
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💰 Оформить подписку", callback_data="subscribe")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+        ])
+
+    await callback.message.edit_text(
+        subscription_text,
+        reply_markup=keyboard,
             parse_mode="HTML"
         )
 

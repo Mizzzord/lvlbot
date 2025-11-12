@@ -1,4 +1,5 @@
 import aiosqlite
+import asyncpg
 import datetime
 import logging
 import os
@@ -6,15 +7,31 @@ from datetime import date
 from typing import Optional
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
 from rank_config import get_rank_by_experience
+from postgres_config import get_postgres_connection_string, validate_postgres_config
 
 logger = logging.getLogger(__name__)
 
 class Database:
-    def __init__(self, db_path: str = "bot_database.db"):
+    def __init__(self, db_path: str = "bot_database.db", use_postgres: bool = False):
         self.db_path = db_path
+        self.use_postgres = use_postgres
+
+        if self.use_postgres:
+            # Проверяем конфигурацию PostgreSQL
+            validate_postgres_config()
+            logger.info("Используется PostgreSQL база данных")
+        else:
+            logger.info("Используется SQLite база данных")
 
     async def init_db(self):
         """Инициализация базы данных и создание таблиц"""
+        if self.use_postgres:
+            await self._init_postgres_db()
+        else:
+            await self._init_sqlite_db()
+
+    async def _init_sqlite_db(self):
+        """Инициализация SQLite базы данных"""
         async with aiosqlite.connect(self.db_path) as db:
             # Создаем таблицу пользователей
             await db.execute('''
@@ -215,7 +232,299 @@ class Database:
             await self._init_default_prizes(db)
 
             await db.commit()
-            logger.info("База данных инициализирована")
+            logger.info("SQLite база данных инициализирована")
+
+    async def _init_postgres_db(self):
+        """Инициализация PostgreSQL базы данных"""
+        conn_string = get_postgres_connection_string()
+        conn = await asyncpg.connect(conn_string)
+
+        try:
+            # Создаем таблицу пользователей
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    telegram_id BIGINT PRIMARY KEY,
+                    language TEXT,
+                    name TEXT,
+                    birth_date TEXT,
+                    height REAL,
+                    weight REAL,
+                    city TEXT,
+                    referral_code TEXT,
+                    goal TEXT,
+                    subscription_active BOOLEAN DEFAULT FALSE,
+                    subscription_start BIGINT,
+                    subscription_end BIGINT,
+                    referral_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Создаем таблицу платежей
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    payment_id TEXT,
+                    order_id TEXT UNIQUE,
+                    amount REAL,
+                    months INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    created_at BIGINT,
+                    updated_at BIGINT,
+                    payment_data TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Создаем таблицу подписок
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    payment_id TEXT,
+                    months INTEGER,
+                    start_date BIGINT,
+                    end_date BIGINT,
+                    status TEXT DEFAULT 'active',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Создаем таблицу статистики игрока
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS player_stats (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE,
+                    nickname TEXT,
+                    strength INTEGER DEFAULT 50,
+                    agility INTEGER DEFAULT 50,
+                    endurance INTEGER DEFAULT 50,
+                    intelligence INTEGER DEFAULT 50,
+                    charisma INTEGER DEFAULT 50,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Создаем таблицу статистики пользователя
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_stats (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE,
+                    level INTEGER DEFAULT 1,
+                    experience INTEGER DEFAULT 0,
+                    rank TEXT DEFAULT 'F',
+                    current_streak INTEGER DEFAULT 0,
+                    best_streak INTEGER DEFAULT 0,
+                    total_tasks_completed INTEGER DEFAULT 0,
+                    last_task_date DATE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Создаем таблицу ежедневных заданий
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS daily_tasks (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    task TEXT,
+                    status TEXT DEFAULT 'active',
+                    created_at DATE DEFAULT CURRENT_DATE,
+                    completed_at TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Создаем таблицу призов
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS prizes (
+                    id SERIAL PRIMARY KEY,
+                    prize_type TEXT,
+                    title TEXT,
+                    description TEXT,
+                    referral_code TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_by BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Инициализируем стандартные призы
+            await self._init_default_prizes_postgres(conn)
+
+            logger.info("PostgreSQL база данных инициализирована")
+
+        finally:
+            await conn.close()
+
+    async def _execute_sqlite(self, query: str, *args):
+        """Выполнение запроса к SQLite"""
+        if self.use_postgres:
+            raise Exception("Этот метод доступен только для SQLite")
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            if query.strip().upper().startswith('SELECT'):
+                cursor = await conn.execute(query, args)
+                result = await cursor.fetchall()
+                return result
+            else:
+                await conn.execute(query, args if args else ())
+                await conn.commit()
+                return None
+
+    async def _execute_postgres(self, query: str, *args):
+        """Выполнение запроса к PostgreSQL"""
+        if not self.use_postgres:
+            raise Exception("Этот метод доступен только для PostgreSQL")
+
+        conn_string = get_postgres_connection_string()
+        conn = await asyncpg.connect(conn_string)
+
+        try:
+            if query.strip().upper().startswith('SELECT'):
+                result = await conn.fetch(query, *args)
+                return result
+            else:
+                result = await conn.execute(query, *args)
+                return result
+        finally:
+            await conn.close()
+
+    async def _init_default_prizes_postgres(self, conn):
+        """Инициализация стандартных призов для PostgreSQL"""
+        import time
+        current_time = int(time.time())
+
+        # Проверяем, есть ли уже призы
+        count = await conn.fetchval('SELECT COUNT(*) FROM prizes')
+
+        if count > 0:
+            return  # Призы уже инициализированы
+
+        # Стандартные призы от главного модератора
+        default_prizes = [
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Бронзовая медаль",
+                'description': "За последовательность в достижении целей",
+                'achievement_type': "streak",
+                'achievement_value': 7,
+                'emoji': "🥉",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            },
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Серебряная медаль",
+                'description': "За настойчивость и дисциплину",
+                'achievement_type': "streak",
+                'achievement_value': 14,
+                'emoji': "🥈",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            },
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Золотая медаль",
+                'description': "За выдающуюся последовательность",
+                'achievement_type': "streak",
+                'achievement_value': 30,
+                'emoji': "🥇",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            },
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Кристалл мотивации",
+                'description': "За активное участие в программе",
+                'achievement_type': "tasks",
+                'achievement_value': 50,
+                'emoji': "💎",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            },
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Почетная грамота",
+                'description': "За достижение ранга специалиста",
+                'achievement_type': "rank",
+                'achievement_value': 4,
+                'emoji': "🎖️",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            },
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Специальный значок",
+                'description': "За достижение ранга профессионала",
+                'achievement_type': "rank",
+                'achievement_value': 5,
+                'emoji': "🏅",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            },
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Корона чемпиона",
+                'description': "За достижение ранга мастера",
+                'achievement_type': "rank",
+                'achievement_value': 6,
+                'emoji': "👑",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            },
+            {
+                'prize_type': PrizeType.ADMIN.value,
+                'referral_code': None,
+                'title': "Звезда легенды",
+                'description': "За достижение высшего ранга",
+                'achievement_type': "rank",
+                'achievement_value': 7,
+                'emoji': "🌟",
+                'is_active': True,
+                'created_at': current_time,
+                'updated_at': current_time
+            }
+        ]
+
+        # Добавляем призы в базу данных
+        for prize in default_prizes:
+            await conn.execute('''
+                INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, emoji, is_active, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ''',
+                prize['prize_type'],
+                prize['referral_code'],
+                prize['title'],
+                prize['description'],
+                prize['achievement_type'],
+                prize['achievement_value'],
+                prize['emoji'],
+                prize['is_active'],
+                prize['created_at'],
+                prize['updated_at']
+            )
 
     async def _add_missing_columns(self, db):
         """Добавляет недостающие колонки для совместимости с существующими базами данных"""

@@ -10,3 +10,7 @@ if not BOT_TOKEN:
 # Дополнительные проверки для других токенов (опционально)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 WATA_TOKEN = os.getenv("WATA_TOKEN")
+
+# Настройки базы данных
+USE_POSTGRES = os.getenv("USE_POSTGRES", "false").lower() == "true"
+DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_database.db")
