@@ -78,6 +78,101 @@ def create_main_menu_keyboard() -> ReplyKeyboardMarkup:
         one_time_keyboard=False
     )
 
+def get_registration_status(user: User) -> dict:
+    """
+    Определяет статус регистрации пользователя
+
+    Returns:
+        dict: {
+            'status': 'complete' | 'incomplete' | 'paid_pending' | 'new',
+            'next_step': str,  # следующий этап регистрации
+            'can_restart': bool,  # можно ли начать заново
+            'message': str  # сообщение для пользователя
+        }
+    """
+    if user.is_complete:
+        # Проверяем, оплатили ли подписку
+        if user.subscription_active:
+            return {
+                'status': 'complete',
+                'next_step': None,
+                'can_restart': False,
+                'message': 'Регистрация завершена, подписка активна'
+            }
+        else:
+            return {
+                'status': 'paid_pending',
+                'next_step': 'payment',
+                'can_restart': False,
+                'message': 'Регистрация завершена, но подписка не оплачена'
+            }
+
+    # Определяем следующий этап регистрации
+    if not user.language:
+        return {
+            'status': 'incomplete',
+            'next_step': 'language',
+            'can_restart': True,
+            'message': 'Не выбран язык'
+        }
+    elif not user.name:
+        return {
+            'status': 'incomplete',
+            'next_step': 'name',
+            'can_restart': True,
+            'message': 'Не указано имя'
+        }
+    elif not user.birth_date:
+        return {
+            'status': 'incomplete',
+            'next_step': 'birth_date',
+            'can_restart': True,
+            'message': 'Не указана дата рождения'
+        }
+    elif not user.height:
+        return {
+            'status': 'incomplete',
+            'next_step': 'height',
+            'can_restart': True,
+            'message': 'Не указан рост'
+        }
+    elif not user.weight:
+        return {
+            'status': 'incomplete',
+            'next_step': 'weight',
+            'can_restart': True,
+            'message': 'Не указан вес'
+        }
+    elif not user.city:
+        return {
+            'status': 'incomplete',
+            'next_step': 'city',
+            'can_restart': True,
+            'message': 'Не указан город'
+        }
+    elif user.referral_code is None:  # проверяем именно None, так как пустая строка допустима
+        return {
+            'status': 'incomplete',
+            'next_step': 'referral',
+            'can_restart': True,
+            'message': 'Не указан реферальный код'
+        }
+    elif not user.goal:
+        return {
+            'status': 'incomplete',
+            'next_step': 'goal',
+            'can_restart': True,
+            'message': 'Не указана цель'
+        }
+    else:
+        # Регистрация почти завершена, но не отмечена как complete
+        return {
+            'status': 'incomplete',
+            'next_step': 'subscription',
+            'can_restart': False,  # нельзя начать заново, так как цель уже указана
+            'message': 'Регистрация почти завершена'
+        }
+
 
 
 async def improve_goal_with_ai(goal: str) -> str:
@@ -536,63 +631,97 @@ async def cmd_start(message: Message, state: FSMContext):
     # Проверяем, есть ли уже пользователь в базе
     existing_user = await db.get_user(telegram_id)
 
-    if existing_user and existing_user.is_complete:
-        # Пользователь уже зарегистрирован
-        referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
-        goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
+    if existing_user:
+        # Определяем статус регистрации
+        reg_status = get_registration_status(existing_user)
 
-        # Проверяем статус подписки
-        subscription_text = ""
-        if existing_user.subscription_active and existing_user.subscription_end:
-            end_date = datetime.datetime.fromtimestamp(existing_user.subscription_end).strftime('%d.%m.%Y')
-            subscription_text = f"💎 Подписка активна до {end_date}\n"
-        else:
-            subscription_text = "💎 Подписка: Не активна\n"
+        if reg_status['status'] == 'complete':
+            # Пользователь полностью зарегистрирован и имеет активную подписку
+            referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
+            goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
 
-        # Проверяем, есть ли карточка игрока
-        player_stats = await db.get_player_stats(telegram_id)
+            # Проверяем статус подписки
+            subscription_text = ""
+            if existing_user.subscription_active and existing_user.subscription_end:
+                end_date = datetime.datetime.fromtimestamp(existing_user.subscription_end).strftime('%d.%m.%Y')
+                subscription_text = f"💎 Подписка активна до {end_date}\n"
+            else:
+                subscription_text = "💎 Подписка: Не активна\n"
 
-        if player_stats:
-            # У пользователя есть карточка игрока - показываем главное меню
-            user_statistics = await db.get_user_stats(telegram_id)
+            # Проверяем, есть ли карточка игрока
+            player_stats = await db.get_player_stats(telegram_id)
+
+            if player_stats:
+                # У пользователя есть карточка игрока - показываем главное меню
+                user_statistics = await db.get_user_stats(telegram_id)
+                await message.answer(
+                    f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"🎮 Ваша игровая карточка активна!\n\n"
+                    f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
+                    f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
+                    f"Готов продолжить приключения?",
+                    parse_mode="HTML"
+                )
+                await state.set_state(UserRegistration.main_menu)
+                await show_main_menu(message)
+            else:
+                # У пользователя нет карточки - показываем обычное приветствие
+                stats_text = ""
+                if player_stats:
+                    stats_text = (
+                        f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
+                        f"⭐ Опыт: {player_stats.experience}\n\n"
+                        f"🏆 <b>Характеристики:</b>\n"
+                        f"💪 Сила: {player_stats.strength}/100\n"
+                        f"🤸 Ловкость: {player_stats.agility}/100\n"
+                        f"🏃 Выносливость: {player_stats.endurance}/100\n"
+                        f"🧠 Интеллект: {player_stats.intelligence}/100\n"
+                        f"✨ Харизма: {player_stats.charisma}/100\n"
+                    )
+
+                await message.answer(
+                    f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"Ты уже в нашей команде изменений!\n\n"
+                    f"👤 Имя: {existing_user.name}\n"
+                    f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
+                    f"📏 Рост: {existing_user.height} см\n"
+                    f"⚖️ Вес: {existing_user.weight} кг\n"
+                    f"🏙️ Город: {existing_user.city}\n"
+                    f"{referral_text}"
+                    f"{goal_text}"
+                    f"{subscription_text}"
+                    f"{stats_text}\n",
+                    parse_mode="HTML"
+                )
+        elif reg_status['status'] == 'paid_pending':
+            # Регистрация завершена, но подписка не оплачена
             await message.answer(
                 f"С возвращением, {existing_user.name}! 👋\n\n"
-                f"🎮 Ваша игровая карточка активна!\n\n"
-                f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
-                f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
-                f"Готов продолжить приключения?",
-                parse_mode="HTML"
+                f"📋 Ваша регистрация завершена, но подписка не активна.\n\n"
+                f"🎯 Цель: {existing_user.goal}\n\n"
+                f"Хотите продолжить с оплатой подписки?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💳 Оплатить подписку", callback_data="continue_payment")],
+                    [InlineKeyboardButton(text="ℹ️ Проверить статус", callback_data="check_payment_status")]
+                ])
             )
-            await state.set_state(UserRegistration.main_menu)
-            await show_main_menu(message)
-        else:
-            # У пользователя нет карточки - показываем обычное приветствие
-            stats_text = ""
-            if player_stats:
-                stats_text = (
-                    f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
-                    f"⭐ Опыт: {player_stats.experience}\n\n"
-                    f"🏆 <b>Характеристики:</b>\n"
-                    f"💪 Сила: {player_stats.strength}/100\n"
-                    f"🤸 Ловкость: {player_stats.agility}/100\n"
-                    f"🏃 Выносливость: {player_stats.endurance}/100\n"
-                    f"🧠 Интеллект: {player_stats.intelligence}/100\n"
-                    f"✨ Харизма: {player_stats.charisma}/100\n"
+        elif reg_status['status'] == 'incomplete':
+            # Регистрация не завершена - предлагаем продолжить или начать заново
+            keyboard_buttons = [
+                [InlineKeyboardButton(text="▶️ Продолжить регистрацию", callback_data="resume_registration")]
+            ]
+
+            if reg_status['can_restart']:
+                keyboard_buttons.append(
+                    [InlineKeyboardButton(text="🔄 Начать заново", callback_data="restart_registration")]
                 )
 
             await message.answer(
-                f"С возвращением, {existing_user.name}! 👋\n\n"
-                f"Ты уже в нашей команде изменений!\n\n"
-                f"👤 Имя: {existing_user.name}\n"
-                f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
-                f"📏 Рост: {existing_user.height} см\n"
-                f"⚖️ Вес: {existing_user.weight} кг\n"
-                f"🏙️ Город: {existing_user.city}\n"
-                f"{referral_text}"
-                f"{goal_text}"
-                f"{subscription_text}"
-                f"{stats_text}\n",
-                parse_mode="HTML"
+                f"Привет, {message.from_user.first_name or 'друг'}! 👋\n\n"
+                f"📝 Кажется, вы не завершили регистрацию.\n"
+                f"🔍 Статус: {reg_status['message']}\n\n"
+                f"Что вы хотите сделать?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
             )
     else:
         # Получаем имя пользователя из Telegram
@@ -651,6 +780,315 @@ async def handle_privacy_declined(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "❌ Регистрация отменена.\n\n"
         "Без согласия с политикой конфиденциальности регистрация невозможна.\n\n"
+        "Вы можете начать заново командой /start",
+        reply_markup=None
+    )
+
+@router.callback_query(lambda c: c.data == "resume_registration")
+async def handle_resume_registration(callback: CallbackQuery, state: FSMContext):
+    """Обработка продолжения незавершенной регистрации"""
+    await callback.answer()
+    telegram_id = callback.from_user.id
+
+    # Получаем данные пользователя
+    user = await db.get_user(telegram_id)
+    if not user:
+        await callback.message.edit_text(
+            "❌ Ошибка: пользователь не найден. Начните регистрацию заново командой /start",
+            reply_markup=None
+        )
+        return
+
+    # Определяем следующий этап регистрации
+    reg_status = get_registration_status(user)
+
+    if reg_status['status'] == 'complete':
+        await callback.message.edit_text(
+            "✅ Ваша регистрация уже завершена!",
+            reply_markup=None
+        )
+        return
+
+    # Устанавливаем состояние и перенаправляем на соответствующий этап
+    next_step = reg_status['next_step']
+
+    if next_step == 'language':
+        await state.set_state(UserRegistration.waiting_for_privacy_policy)
+        await callback.message.edit_text(
+            "🔄 Продолжаем регистрацию...\n\n"
+            "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
+            "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
+            "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
+            "И нашей политикой обработки персональных данных:\n"
+            "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
+            "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
+            ])
+        )
+    elif next_step == 'name':
+        await state.set_state(UserRegistration.waiting_for_name)
+        await callback.message.edit_text(
+            "🔄 Продолжаем регистрацию...\n\n"
+            "✅ Спасибо за подтверждение!\n\n"
+            "Теперь введите ваше имя:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+            ])
+        )
+    elif next_step == 'birth_date':
+        await state.set_state(UserRegistration.waiting_for_birth_date)
+        await callback.message.edit_text(
+            f"🔄 Продолжаем регистрацию...\n\n"
+            f"👤 Имя: {user.name}\n\n"
+            f"📅 Теперь введите дату рождения в формате ДД.ММ.ГГГГ\n"
+            f"(например: 15.05.1990):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+            ])
+        )
+    elif next_step == 'height':
+        await state.set_state(UserRegistration.waiting_for_height)
+        await callback.message.edit_text(
+            f"🔄 Продолжаем регистрацию...\n\n"
+            f"👤 Имя: {user.name}\n"
+            f"📅 Дата рождения: {user.birth_date.strftime('%d.%m.%Y')}\n\n"
+            f"📏 Теперь введите ваш рост в сантиметрах (50-250):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+            ])
+        )
+    elif next_step == 'weight':
+        await state.set_state(UserRegistration.waiting_for_weight)
+        await callback.message.edit_text(
+            f"🔄 Продолжаем регистрацию...\n\n"
+            f"👤 Имя: {user.name}\n"
+            f"📅 Дата рождения: {user.birth_date.strftime('%d.%m.%Y')}\n"
+            f"📏 Рост: {user.height} см\n\n"
+            f"⚖️ Теперь введите ваш вес в килограммах (3-300):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+            ])
+        )
+    elif next_step == 'city':
+        await state.set_state(UserRegistration.waiting_for_city)
+        await callback.message.edit_text(
+            f"🔄 Продолжаем регистрацию...\n\n"
+            f"👤 Имя: {user.name}\n"
+            f"📅 Дата рождения: {user.birth_date.strftime('%d.%m.%Y')}\n"
+            f"📏 Рост: {user.height} см\n"
+            f"⚖️ Вес: {user.weight} кг\n\n"
+            f"🏙️ Теперь введите ваш город:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+            ])
+        )
+    elif next_step == 'referral':
+        await state.set_state(UserRegistration.waiting_for_referral)
+        await callback.message.edit_text(
+            f"🔄 Продолжаем регистрацию...\n\n"
+            f"👤 Имя: {user.name}\n"
+            f"📅 Дата рождения: {user.birth_date.strftime('%d.%m.%Y')}\n"
+            f"📏 Рост: {user.height} см\n"
+            f"⚖️ Вес: {user.weight} кг\n"
+            f"🏙️ Город: {user.city}\n\n"
+            f"🔗 Теперь введите реферальный код (если есть) или нажмите 'Пропустить':",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_referral")]
+            ])
+        )
+    elif next_step == 'goal':
+        await state.set_state(UserRegistration.waiting_for_goal)
+        await callback.message.edit_text(
+            f"🔄 Продолжаем регистрацию...\n\n"
+            f"👤 Имя: {user.name}\n"
+            f"📅 Дата рождения: {user.birth_date.strftime('%d.%m.%Y')}\n"
+            f"📏 Рост: {user.height} см\n"
+            f"⚖️ Вес: {user.weight} кг\n"
+            f"🏙️ Город: {user.city}\n\n"
+            f"🎯 Теперь расскажите о вашей главной цели (минимум 3 символа):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+            ])
+        )
+    elif next_step == 'subscription':
+        await state.set_state(UserRegistration.waiting_for_subscription)
+        await callback.message.edit_text(
+            f"🔄 Продолжаем регистрацию...\n\n"
+            f"👤 Имя: {user.name}\n"
+            f"🎯 Цель: {user.goal}\n\n"
+            f"💎 Теперь выберите период подписки:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="1 месяц - 200₽", callback_data="sub_1")],
+                [InlineKeyboardButton(text="3 месяца - 1200₽", callback_data="sub_3")],
+                [InlineKeyboardButton(text="6 месяцев - 3000₽", callback_data="sub_6")],
+                [InlineKeyboardButton(text="12 месяцев - 4000₽", callback_data="sub_12")]
+            ])
+        )
+
+@router.callback_query(lambda c: c.data == "restart_registration")
+async def handle_restart_registration(callback: CallbackQuery, state: FSMContext):
+    """Обработка начала регистрации заново"""
+    await callback.answer()
+    telegram_id = callback.from_user.id
+
+    # Проверяем, можно ли начать заново
+    user = await db.get_user(telegram_id)
+    if user:
+        reg_status = get_registration_status(user)
+        if not reg_status['can_restart']:
+            await callback.message.edit_text(
+                "❌ Нельзя начать регистрацию заново, так как у вас уже указана цель.\n\n"
+                "Используйте команду /start для продолжения.",
+                reply_markup=None
+            )
+            return
+
+    # Очищаем данные пользователя (кроме telegram_id)
+    if user:
+        # Создаем нового пользователя с тем же telegram_id
+        new_user = User(telegram_id=telegram_id)
+        await db.save_user(new_user)
+
+    # Очищаем состояние FSM
+    await state.clear()
+
+    # Начинаем регистрацию заново
+    user_name = callback.from_user.first_name or "друг"
+
+    await callback.message.edit_text(
+        f"🔄 Начинаем регистрацию заново...\n\n"
+        f"Привет, {user_name}! 👋 Я GoPrime — твой личный мотивационный помощник в Telegram. "
+        f"Я помогу тебе достигать целей шаг за шагом: каждый день буду предлагать простые, "
+        f"но мощные задания, адаптированные под твои приоритеты — фитнес, обучение, карьера, хобби или что-то своё. "
+        f"Расскажи о своей главной цели, и мы сразу начнём! Готов к первым шагам к успеху? 🚀"
+    )
+
+    # Начинаем регистрацию с политики конфиденциальности
+    await state.set_state(UserRegistration.waiting_for_privacy_policy)
+    await callback.message.answer(
+        "🤖 Для начала давайте настроим бота под вас.\n\n"
+        "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
+        "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
+        "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
+        "И нашей политикой обработки персональных данных:\n"
+        "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
+        "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
+        ])
+    )
+
+@router.callback_query(lambda c: c.data == "continue_payment")
+async def handle_continue_payment(callback: CallbackQuery, state: FSMContext):
+    """Обработка продолжения оплаты подписки"""
+    await callback.answer()
+    telegram_id = callback.from_user.id
+
+    user = await db.get_user(telegram_id)
+    if not user or not user.is_complete:
+        await callback.message.edit_text(
+            "❌ Ошибка: регистрация не завершена. Используйте /start для продолжения.",
+            reply_markup=None
+        )
+        return
+
+    # Устанавливаем состояние для оплаты
+    await state.set_state(UserRegistration.waiting_for_subscription)
+    await callback.message.edit_text(
+        f"💳 Продолжаем с оплатой подписки...\n\n"
+        f"👤 Имя: {user.name}\n"
+        f"🎯 Цель: {user.goal}\n\n"
+        f"💎 Выберите период подписки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="1 месяц - 200₽", callback_data="sub_1")],
+            [InlineKeyboardButton(text="3 месяца - 1200₽", callback_data="sub_3")],
+            [InlineKeyboardButton(text="6 месяцев - 3000₽", callback_data="sub_6")],
+            [InlineKeyboardButton(text="12 месяцев - 4000₽", callback_data="sub_12")]
+        ])
+    )
+
+@router.callback_query(lambda c: c.data == "check_payment_status")
+async def handle_check_payment_status(callback: CallbackQuery, state: FSMContext):
+    """Обработка проверки статуса оплаты"""
+    await callback.answer()
+    telegram_id = callback.from_user.id
+
+    user = await db.get_user(telegram_id)
+    if not user:
+        await callback.message.edit_text(
+            "❌ Ошибка: пользователь не найден.",
+            reply_markup=None
+        )
+        return
+
+    # Получаем активную подписку
+    active_subscription = await db.get_active_subscription(telegram_id)
+
+    if active_subscription:
+        end_date = datetime.datetime.fromtimestamp(active_subscription.end_date).strftime('%d.%m.%Y')
+        await callback.message.edit_text(
+            f"✅ Ваша подписка активна!\n\n"
+            f"📅 Дата окончания: {end_date}\n"
+            f"🎯 Цель: {user.goal}\n\n"
+            f"Готов продолжить приключения?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎮 Начать игру", callback_data="start_game")]
+            ])
+        )
+    else:
+        await callback.message.edit_text(
+            f"❌ Подписка не активна.\n\n"
+            f"👤 Имя: {user.name}\n"
+            f"🎯 Цель: {user.goal}\n\n"
+            f"Хотите оплатить подписку?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Оплатить", callback_data="continue_payment")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_start")]
+            ])
+        )
+
+@router.callback_query(lambda c: c.data == "start_game")
+async def handle_start_game(callback: CallbackQuery, state: FSMContext):
+    """Обработка начала игры после проверки подписки"""
+    await callback.answer()
+
+    await state.set_state(UserRegistration.main_menu)
+    await callback.message.edit_text(
+        "🎮 Добро пожаловать в игру!\n\n"
+        "Выберите действие:",
+        reply_markup=create_main_menu_keyboard()
+    )
+
+@router.callback_query(lambda c: c.data == "back_to_start")
+async def handle_back_to_start(callback: CallbackQuery, state: FSMContext):
+    """Обработка возврата к началу"""
+    await callback.answer()
+
+    # Имитируем команду /start
+    from aiogram.types import Message
+    fake_message = Message(
+        message_id=callback.message.message_id,
+        date=callback.message.date,
+        chat=callback.message.chat,
+        from_user=callback.from_user,
+        text="/start"
+    )
+
+    await cmd_start(fake_message, state)
+
+@router.callback_query(lambda c: c.data == "cancel_registration")
+async def handle_cancel_registration(callback: CallbackQuery, state: FSMContext):
+    """Обработка отмены регистрации"""
+    await callback.answer()
+    await state.clear()
+
+    await callback.message.edit_text(
+        "❌ Регистрация отменена.\n\n"
         "Вы можете начать заново командой /start",
         reply_markup=None
     )
@@ -1568,11 +2006,34 @@ async def handle_profile(message: Message, state: FSMContext):
         except Exception as e:
             logger.warning(f"Не удалось отправить карточку: {e}")
 
+    # Получаем детальную информацию о ранге
+    rank_info = await db.get_user_rank_info(user_id)
+
+    # Формируем текст ранга
+    if rank_info:
+        rank_text = (
+            f"🏅 <b>Ранг:</b> {rank_info['current_rank_emoji']} {rank_info['current_rank_name']} ({rank_info['current_rank'].value})\n"
+            f"📈 <b>Прогресс:</b> {rank_info['experience_in_rank']}/{rank_info['experience_in_rank'] + rank_info['experience_to_next_rank']} XP "
+            f"({rank_info['progress_percentage']:.1f}%)\n"
+        )
+
+        if rank_info['next_rank_info']:
+            next_rank, next_exp = rank_info['next_rank_info']
+            from rank_config import RANK_EMOJIS, RANK_NAMES
+            next_rank_emoji = RANK_EMOJIS.get(next_rank, "")
+            next_rank_name = RANK_NAMES.get(next_rank, str(next_rank))
+            rank_text += f"🎯 <b>Следующий ранг:</b> {next_rank_emoji} {next_rank_name} ({next_exp} XP)\n"
+        else:
+            rank_text += "🏆 <b>Максимальный ранг достигнут!</b>\n"
+    else:
+        rank_text = f"🏅 <b>Ранг:</b> {user_statistics.rank.value}\n"
+
     await message.answer(
         f"👤 <b>Профиль игрока</b>\n\n"
         f"🏆 <b>Ник:</b> {player_stats.nickname}\n"
         f"⭐ <b>Опыт:</b> {user_statistics.experience} | 📊 <b>Уровень:</b> {user_statistics.level}\n"
-        f"🏅 <b>Ранг:</b> {user_statistics.rank.value} | 🔥 <b>Стрик:</b> {user_statistics.current_streak} дней\n"
+        f"{rank_text}"
+        f"🔥 <b>Стрик:</b> {user_statistics.current_streak} дней\n"
         f"🎯 <b>Лучший стрик:</b> {user_statistics.best_streak} дней\n"
         f"✅ <b>Выполнено заданий:</b> {user_statistics.total_tasks_completed}\n\n"
         f"🏆 <b>Характеристики:</b>\n"
@@ -1590,9 +2051,15 @@ async def handle_profile(message: Message, state: FSMContext):
 def get_achievement_description(achievement_type: str, achievement_value: int) -> str:
     """Получение описания достижения"""
     if achievement_type == 'rank':
-        rank_names = ['F', 'E', 'D', 'C', 'B', 'A', 'S', 'S+']
-        rank_name = rank_names[achievement_value - 1] if 0 <= achievement_value - 1 < len(rank_names) else f"неизвестный ({achievement_value})"
-        return f'Достижение ранга {rank_name}'
+        from rank_config import RANK_NAMES
+        # achievement_value соответствует индексу ранга (1 = F, 2 = E, ..., 8 = S+)
+        rank_order = list(RANK_NAMES.keys())
+        rank = rank_order[achievement_value - 1] if 0 <= achievement_value - 1 < len(rank_order) else None
+        if rank:
+            rank_name = RANK_NAMES[rank]
+            return f'Достижение ранга {rank_name} ({rank.value})'
+        else:
+            return f'Достижение ранга {achievement_value}'
 
     descriptions = {
         'streak': f'Стрик {achievement_value} дней подряд',
@@ -1602,15 +2069,29 @@ def get_achievement_description(achievement_type: str, achievement_value: int) -
     }
     return descriptions.get(achievement_type, f'{achievement_type}: {achievement_value}')
 
-def get_profile_text(user, player_stats, user_statistics) -> str:
+def get_profile_text(user, player_stats, user_statistics, db) -> str:
     """Формирование текста профиля"""
+    import asyncio
+    # Получаем информацию о ранге асинхронно
+    rank_info = asyncio.run(db.get_user_rank_info(user.telegram_id))
+
     referral_text = f"🔗 <b>Реферальный код:</b> {user.referral_code}\n" if user.referral_code else ""
+
+    # Формируем текст ранга
+    if rank_info:
+        rank_text = (
+            f"🏅 <b>Ранг:</b> {rank_info['current_rank_emoji']} {rank_info['current_rank_name']} ({rank_info['current_rank'].value})\n"
+            f"📈 <b>Прогресс:</b> {rank_info['experience_in_rank']}/{rank_info['experience_in_rank'] + rank_info['experience_to_next_rank']} XP\n"
+        )
+    else:
+        rank_text = f"🏅 <b>Ранг:</b> {user_statistics.rank.value}\n"
 
     return (
         f"👤 <b>Профиль игрока</b>\n\n"
         f"🏆 <b>Ник:</b> {player_stats.nickname}\n"
         f"⭐ <b>Опыт:</b> {user_statistics.experience} | 📊 <b>Уровень:</b> {user_statistics.level}\n"
-        f"🏅 <b>Ранг:</b> {user_statistics.rank.value} | 🔥 <b>Стрик:</b> {user_statistics.current_streak} дней\n"
+        f"{rank_text}"
+        f"🔥 <b>Стрик:</b> {user_statistics.current_streak} дней\n"
         f"🎯 <b>Лучший стрик:</b> {user_statistics.best_streak} дней\n"
         f"✅ <b>Выполнено заданий:</b> {user_statistics.total_tasks_completed}\n"
         f"{referral_text}\n"

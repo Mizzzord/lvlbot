@@ -5,6 +5,7 @@ import os
 from datetime import date
 from typing import Optional
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
+from rank_config import get_rank_by_experience
 
 logger = logging.getLogger(__name__)
 
@@ -1066,6 +1067,65 @@ class Database:
         user_stats.referral_rank = user_stats.rank
         await self.save_user_stats(user_stats)
 
+    # Методы для работы с рангами
+
+    async def get_user_rank_info(self, user_id: int) -> dict | None:
+        """Получение детальной информации о ранге пользователя"""
+        from rank_config import get_rank_progress, get_next_rank_experience, RANK_NAMES, RANK_DESCRIPTIONS, RANK_EMOJIS
+
+        user_stats = await self.get_user_stats(user_id)
+        if not user_stats:
+            return None
+
+        current_rank, exp_in_rank, exp_to_next, progress_percent = get_rank_progress(user_stats.experience)
+
+        next_rank_info = get_next_rank_experience(user_stats.experience)
+
+        return {
+            'current_rank': current_rank,
+            'current_rank_name': RANK_NAMES.get(current_rank, str(current_rank)),
+            'current_rank_description': RANK_DESCRIPTIONS.get(current_rank, ""),
+            'current_rank_emoji': RANK_EMOJIS.get(current_rank, ""),
+            'experience': user_stats.experience,
+            'experience_in_rank': exp_in_rank,
+            'experience_to_next_rank': exp_to_next,
+            'progress_percentage': progress_percent,
+            'next_rank_info': next_rank_info,  # (next_rank, required_exp) или None
+            'level': user_stats.level
+        }
+
+    async def get_users_by_rank_distribution(self) -> dict:
+        """Получение распределения пользователей по рангам"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT us.rank, COUNT(*) as count
+                FROM user_stats us
+                JOIN users u ON us.user_id = u.telegram_id
+                WHERE u.subscription_active = 1
+                GROUP BY us.rank
+                ORDER BY count DESC
+            ''')
+
+            rows = await cursor.fetchall()
+            return {row[0]: row[1] for row in rows}
+
+    async def get_rank_achievement_stats(self) -> list[tuple]:
+        """Статистика достижений рангов (сколько пользователей достигло каждого ранга)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT us.rank, COUNT(*) as count,
+                       AVG(us.experience) as avg_experience,
+                       MAX(us.experience) as max_experience
+                FROM user_stats us
+                JOIN users u ON us.user_id = u.telegram_id
+                WHERE u.subscription_active = 1
+                GROUP BY us.rank
+                ORDER BY us.rank
+            ''')
+
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3]) for row in rows]
+
     # Методы для работы с призами
 
     async def save_prize(self, prize: Prize) -> int:
@@ -1401,14 +1461,15 @@ class Database:
                 return False
 
     async def _update_user_level(self, user_id: int, db):
-        """Обновление уровня пользователя на основе опыта"""
+        """Обновление уровня и ранга пользователя на основе опыта"""
         cursor = await db.execute('SELECT experience FROM user_stats WHERE user_id = ?', (user_id,))
         row = await cursor.fetchone()
         if row:
             experience = row[0]
             new_level = experience // 100 + 1  # Каждый 100 опыта = 1 уровень
+            new_rank = get_rank_by_experience(experience)  # Получаем ранг по опыту
 
-            await db.execute('UPDATE user_stats SET level = ? WHERE user_id = ?', (new_level, user_id))
+            await db.execute('UPDATE user_stats SET level = ?, rank = ? WHERE user_id = ?', (new_level, new_rank.value, user_id))
 
     def _delete_task_media_file(self, media_path: str) -> bool:
         """Удаление медиафайла задания для экономии места"""
