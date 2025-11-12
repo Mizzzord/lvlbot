@@ -1924,6 +1924,10 @@ class Database:
         return [b['telegram_id'] for b in bloggers]
 
     async def get_admin_telegram_ids(self) -> list[int]:
-        """Получение списка Telegram ID админов (из конфига)"""
-        # Пока что возвращаем статический список, но можно тоже перенести в БД
-        return [743054320]  # Из moderator_config.py
+        """Получение списка Telegram ID админов (из переменных окружения)"""
+        try:
+            from moderator_config import ADMIN_TELEGRAM_IDS
+            return ADMIN_TELEGRAM_IDS
+        except ImportError:
+            # Fallback на случай если moderator_config не доступен
+            return []

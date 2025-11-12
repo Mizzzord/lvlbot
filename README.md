@@ -38,18 +38,18 @@ OPENROUTER_API_KEY=ваш_openrouter_api_key_здесь
 ```
 
 #### Для модераторского бота
-Отредактируйте файл `moderator_config.py`:
-```python
-MODERATOR_BOT_TOKEN = "ваш_токен_модераторского_бота_здесь"
+Создайте или обновите файл `.env` в корневой директории проекта:
+```env
+# Модераторский бот Telegram
+MODERATOR_BOT_TOKEN=ваш_токен_модераторского_бота_здесь
 
-ADMIN_TELEGRAM_IDS = [
-    123456789,  # Telegram ID главного модератора
-]
-
-BLOGGER_TELEGRAM_IDS = [
-    987654321,  # Telegram ID блогера
-]
+# Белый список Telegram ID (через запятую, без пробелов)
+ADMIN_TELEGRAM_IDS=123456789,987654321
+BLOGGER_TELEGRAM_IDS=
+MODERATOR_TELEGRAM_IDS=
 ```
+
+**Примечание:** Теперь все настройки модераторского бота хранятся в переменных окружения для безопасности и удобства настройки.
 
 - **BOT_TOKEN**: получить у [@BotFather](https://t.me/BotFather) в Telegram
 - **MODERATOR_BOT_TOKEN**: отдельный токен для модераторского бота
