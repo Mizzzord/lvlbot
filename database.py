@@ -158,6 +158,7 @@ class Database:
                     description TEXT,
                     achievement_type TEXT NOT NULL,
                     achievement_value INTEGER NOT NULL,
+                    custom_condition TEXT,
                     emoji TEXT DEFAULT '🎁',
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at INTEGER NOT NULL,
@@ -1446,24 +1447,58 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             if prize.id is None:
                 # Создание нового приза
-                cursor = await db.execute('''
-                    INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, emoji, is_active, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    prize.prize_type.value,
-                    prize.referral_code,
-                    prize.title,
-                    prize.description,
-                    prize.achievement_type,
-                    prize.achievement_value,
-                    prize.emoji,
-                    prize.is_active,
-                    prize.created_at,
-                    prize.updated_at
-                ))
+                # Проверяем наличие колонки custom_condition
+                cursor = await db.execute("PRAGMA table_info(prizes)")
+                columns = [row[1] for row in await cursor.fetchall()]
+                has_custom_condition = 'custom_condition' in columns
+                
+                if has_custom_condition:
+                    cursor = await db.execute('''
+                        INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, custom_condition, emoji, is_active, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        prize.prize_type.value,
+                        prize.referral_code,
+                        prize.title,
+                        prize.description,
+                        prize.achievement_type,
+                        prize.achievement_value,
+                        prize.custom_condition,
+                        prize.emoji,
+                        prize.is_active,
+                        prize.created_at,
+                        prize.updated_at
+                    ))
+                else:
+                    # Добавляем колонку если её нет
+                    await db.execute('ALTER TABLE prizes ADD COLUMN custom_condition TEXT')
+                    cursor = await db.execute('''
+                        INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, custom_condition, emoji, is_active, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        prize.prize_type.value,
+                        prize.referral_code,
+                        prize.title,
+                        prize.description,
+                        prize.achievement_type,
+                        prize.achievement_value,
+                        prize.custom_condition,
+                        prize.emoji,
+                        prize.is_active,
+                        prize.created_at,
+                        prize.updated_at
+                    ))
                 prize.id = cursor.lastrowid
             else:
                 # Обновление существующего приза
+                # Проверяем наличие колонки custom_condition
+                cursor = await db.execute("PRAGMA table_info(prizes)")
+                columns = [row[1] for row in await cursor.fetchall()]
+                has_custom_condition = 'custom_condition' in columns
+                
+                if not has_custom_condition:
+                    await db.execute('ALTER TABLE prizes ADD COLUMN custom_condition TEXT')
+                
                 await db.execute('''
                     UPDATE prizes SET
                         prize_type = ?,
@@ -1472,6 +1507,7 @@ class Database:
                         description = ?,
                         achievement_type = ?,
                         achievement_value = ?,
+                        custom_condition = ?,
                         emoji = ?,
                         is_active = ?,
                         updated_at = ?
@@ -1483,6 +1519,7 @@ class Database:
                     prize.description,
                     prize.achievement_type,
                     prize.achievement_value,
+                    prize.custom_condition,
                     prize.emoji,
                     prize.is_active,
                     prize.updated_at,
@@ -1523,6 +1560,15 @@ class Database:
             prizes = []
 
             for row in rows:
+                # Проверяем наличие колонки custom_condition (для совместимости со старыми БД)
+                custom_condition = None
+                try:
+                    # Пытаемся получить значение, если колонка существует
+                    custom_condition = row['custom_condition'] if row['custom_condition'] else None
+                except (KeyError, IndexError):
+                    # Колонка отсутствует в старых версиях БД
+                    custom_condition = None
+                
                 prizes.append(Prize(
                     id=row['id'],
                     prize_type=PrizeType(row['prize_type']),
@@ -1531,6 +1577,7 @@ class Database:
                     description=row['description'],
                     achievement_type=row['achievement_type'],
                     achievement_value=row['achievement_value'],
+                    custom_condition=custom_condition,
                     emoji=row['emoji'],
                     is_active=row['is_active'],
                     created_at=row['created_at'],
@@ -1547,6 +1594,15 @@ class Database:
 
             row = await cursor.fetchone()
             if row:
+                # Проверяем наличие колонки custom_condition (для совместимости со старыми БД)
+                custom_condition = None
+                try:
+                    # Пытаемся получить значение, если колонка существует
+                    custom_condition = row['custom_condition'] if row['custom_condition'] else None
+                except (KeyError, IndexError):
+                    # Колонка отсутствует в старых версиях БД
+                    custom_condition = None
+                
                 return Prize(
                     id=row['id'],
                     prize_type=PrizeType(row['prize_type']),
@@ -1555,6 +1611,7 @@ class Database:
                     description=row['description'],
                     achievement_type=row['achievement_type'],
                     achievement_value=row['achievement_value'],
+                    custom_condition=custom_condition,
                     emoji=row['emoji'],
                     is_active=row['is_active'],
                     created_at=row['created_at'],

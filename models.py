@@ -142,8 +142,9 @@ class Prize:
     referral_code: Optional[str] = None  # реферальный код блогера (только для blogger типа)
     title: str = ""  # название приза
     description: str = ""  # описание приза
-    achievement_type: str = ""  # тип достижения (streak, rank, level, tasks)
-    achievement_value: int = 0  # значение достижения
+    achievement_type: str = ""  # тип достижения (streak, rank, level, tasks, experience, custom)
+    achievement_value: int = 0  # значение достижения (число для стандартных типов)
+    custom_condition: Optional[str] = None  # произвольное текстовое описание условия (для типа "custom")
     emoji: str = "🎁"  # эмодзи приза
     is_active: bool = True  # активен ли приз
     created_at: int = 0  # timestamp создания

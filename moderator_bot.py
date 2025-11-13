@@ -109,6 +109,7 @@ class PrizeManagementStates(StatesGroup):
     waiting_for_prize_description = State()
     waiting_for_achievement_type = State()
     waiting_for_achievement_value = State()
+    waiting_for_custom_condition = State()  # Новое состояние для произвольных условий
     waiting_for_prize_emoji = State()
     confirming_prize = State()
     waiting_for_prize_id_to_delete = State()
@@ -117,6 +118,7 @@ class PrizeManagementStates(StatesGroup):
     editing_prize_description = State()
     editing_achievement_type = State()
     editing_achievement_value = State()
+    editing_custom_condition = State()  # Новое состояние для редактирования произвольных условий
     editing_prize_emoji = State()
     confirming_prize_edit = State()
 
@@ -830,7 +832,7 @@ async def handle_prize_management(message: Message):
                 text += f"{prize.emoji} <b>{prize.title}</b>\n"
                 if prize.description:
                     text += f"   └ {prize.description}\n"
-                text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
+                text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n"
                 text += f"   └ ID: {prize.id}\n\n"
         else:
             text += "У вас пока нет созданных призов.\nИспользуйте кнопку '➕ Создать приз' для создания первого приза."
@@ -1222,7 +1224,7 @@ async def handle_edit_specific_prize(callback: CallbackQuery, state: FSMContext)
     text = f"✏️ <b>Редактирование приза</b>\n\n"
     text += f"🎁 <b>{prize.title}</b>\n"
     text += f"📝 {prize.description or 'Без описания'}\n"
-    text += f"🎯 {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
+    text += f"🎯 {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n"
     text += f"😊 Эмодзи: {prize.emoji}\n\n"
     text += "Что вы хотите изменить?"
 
@@ -1295,7 +1297,7 @@ async def handle_edit_achievement(callback: CallbackQuery, state: FSMContext):
         return
 
     text = f"✏️ <b>Редактирование условия</b>\n\n"
-    text += f"Текущее условие: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n\n"
+    text += f"Текущее условие: {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n\n"
     text += "Выберите новый тип достижения:"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1304,6 +1306,7 @@ async def handle_edit_achievement(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="📊 Уровень", callback_data="edit_achievement_level")],
         [InlineKeyboardButton(text="✅ Задания", callback_data="edit_achievement_tasks")],
         [InlineKeyboardButton(text="⭐ Опыт", callback_data="edit_achievement_experience")],
+        [InlineKeyboardButton(text="✏️ Произвольное условие", callback_data="edit_achievement_custom")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
     ])
 
@@ -1348,6 +1351,24 @@ async def handle_edit_achievement_type(callback: CallbackQuery, state: FSMContex
     achievement_type = callback.data.replace("edit_achievement_", "")
 
     await state.update_data(editing_achievement_type=achievement_type)
+
+    # Если выбрано произвольное условие, переходим к вводу текста
+    if achievement_type == "custom":
+        text = f"✏️ <b>Редактирование условия</b>\n\n"
+        text += "✏️ <b>Произвольное условие</b>\n\n"
+        text += "Введите описание условия получения приза:\n\n"
+        text += "Примеры:\n"
+        text += "• Стрик 7 дней И уровень 5\n"
+        text += "• Выполнить 10 заданий за неделю\n"
+        text += "• Достичь ранга B или выше\n"
+        text += "• Набрать 1000 опыта за месяц"
+
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+        ]))
+
+        await state.set_state(PrizeManagementStates.editing_custom_condition)
+        return
 
     # Показываем примеры значений для разных типов
     examples = {
@@ -1400,6 +1421,22 @@ async def handle_editing_prize_description(message: Message, state: FSMContext):
     await state.update_data(editing_description=description)
     await confirm_prize_edit(message, state)
 
+@dp.message(PrizeManagementStates.editing_custom_condition)
+async def handle_editing_custom_condition(message: Message, state: FSMContext):
+    """Обработка произвольного условия при редактировании"""
+    custom_condition = message.text.strip()
+    
+    if len(custom_condition) < 5:
+        await message.answer("❌ Описание условия должно содержать минимум 5 символов.")
+        return
+    
+    if len(custom_condition) > 500:
+        await message.answer("❌ Описание условия слишком длинное (максимум 500 символов).")
+        return
+    
+    await state.update_data(editing_custom_condition=custom_condition, editing_achievement_value=0)
+    await confirm_prize_edit(message, state)
+
 @dp.message(PrizeManagementStates.editing_achievement_value)
 async def handle_editing_achievement_value(message: Message, state: FSMContext):
     """Обработка нового значения достижения"""
@@ -1412,7 +1449,7 @@ async def handle_editing_achievement_value(message: Message, state: FSMContext):
         await message.answer("❌ Введите корректное число.")
         return
 
-    await state.update_data(editing_achievement_value=value)
+    await state.update_data(editing_achievement_value=value, editing_custom_condition=None)
     await confirm_prize_edit(message, state)
 
 @dp.message(PrizeManagementStates.editing_prize_emoji)
@@ -1474,8 +1511,9 @@ async def confirm_prize_edit(message, state: FSMContext):
     if 'editing_achievement_type' in data or 'editing_achievement_value' in data:
         new_type = data.get('editing_achievement_type', original_prize.achievement_type)
         new_value = data.get('editing_achievement_value', original_prize.achievement_value)
-        old_achievement = get_achievement_description(original_prize.achievement_type, original_prize.achievement_value)
-        new_achievement = get_achievement_description(new_type, new_value)
+        old_achievement = get_achievement_description(original_prize.achievement_type, original_prize.achievement_value, original_prize.custom_condition)
+        new_custom_condition = data.get('editing_custom_condition', original_prize.custom_condition)
+        new_achievement = get_achievement_description(new_type, new_value, new_custom_condition)
         text += f"🎯 Условие: {old_achievement} → <b>{new_achievement}</b>\n"
     if 'editing_emoji' in data:
         text += f"😊 Эмодзи: {original_prize.emoji} → <b>{data['editing_emoji']}</b>\n"
@@ -1520,6 +1558,7 @@ async def handle_confirm_prize_edit(callback: CallbackQuery, state: FSMContext):
         description=data.get('editing_description', original_prize.description),
         achievement_type=data.get('editing_achievement_type', original_prize.achievement_type),
         achievement_value=data.get('editing_achievement_value', original_prize.achievement_value),
+        custom_condition=data.get('editing_custom_condition', original_prize.custom_condition),
         emoji=data.get('editing_emoji', original_prize.emoji),
         is_active=original_prize.is_active,
         created_at=original_prize.created_at,
@@ -1598,8 +1637,12 @@ async def handle_cancel_blogger_prize(callback: CallbackQuery, state: FSMContext
 
 # Вспомогательные функции
 
-def get_achievement_description(achievement_type: str, achievement_value: int) -> str:
+def get_achievement_description(achievement_type: str, achievement_value: int, custom_condition: Optional[str] = None) -> str:
     """Получение описания достижения"""
+    # Если это произвольное условие, возвращаем его текст
+    if achievement_type == 'custom' and custom_condition:
+        return custom_condition
+    
     if achievement_type == 'rank':
         rank_names = ['F', 'E', 'D', 'C', 'B', 'A', 'S', 'S+']
         rank_name = rank_names[achievement_value - 1] if 0 <= achievement_value - 1 < len(rank_names) else f"неизвестный ({achievement_value})"
@@ -1762,6 +1805,7 @@ async def handle_prize_description(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📊 Уровень", callback_data="achievement_level")],
         [InlineKeyboardButton(text="✅ Задания", callback_data="achievement_tasks")],
         [InlineKeyboardButton(text="⭐ Опыт", callback_data="achievement_experience")],
+        [InlineKeyboardButton(text="✏️ Произвольное условие", callback_data="achievement_custom")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_prize_creation")]
     ])
 
@@ -1784,6 +1828,7 @@ async def handle_skip_description(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="📊 Уровень", callback_data="achievement_level")],
         [InlineKeyboardButton(text="✅ Задания", callback_data="achievement_tasks")],
         [InlineKeyboardButton(text="⭐ Опыт", callback_data="achievement_experience")],
+        [InlineKeyboardButton(text="✏️ Произвольное условие", callback_data="achievement_custom")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_prize_creation")]
     ])
 
@@ -1797,6 +1842,24 @@ async def handle_achievement_type(callback: CallbackQuery, state: FSMContext):
 
     achievement_type = callback.data.replace("achievement_", "")
     await state.update_data(achievement_type=achievement_type)
+
+    # Если выбрано произвольное условие, переходим к вводу текста
+    if achievement_type == "custom":
+        text = "🎁 <b>Создание приза</b>\n\n"
+        text += "✏️ <b>Произвольное условие</b>\n\n"
+        text += "Введите описание условия получения приза:\n\n"
+        text += "Примеры:\n"
+        text += "• Стрик 7 дней И уровень 5\n"
+        text += "• Выполнить 10 заданий за неделю\n"
+        text += "• Достичь ранга B или выше\n"
+        text += "• Набрать 1000 опыта за месяц"
+
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_prize_creation")]
+        ]))
+
+        await state.set_state(PrizeManagementStates.waiting_for_custom_condition)
+        return
 
     # Показываем примеры значений для разных типов
     examples = {
@@ -1817,6 +1880,32 @@ async def handle_achievement_type(callback: CallbackQuery, state: FSMContext):
     ]))
 
     await state.set_state(PrizeManagementStates.waiting_for_achievement_value)
+
+@dp.message(PrizeManagementStates.waiting_for_custom_condition)
+async def handle_custom_condition(message: Message, state: FSMContext):
+    """Обработка произвольного условия"""
+    custom_condition = message.text.strip()
+    
+    if len(custom_condition) < 5:
+        await message.answer("❌ Описание условия должно содержать минимум 5 символов.")
+        return
+    
+    if len(custom_condition) > 500:
+        await message.answer("❌ Описание условия слишком длинное (максимум 500 символов).")
+        return
+    
+    await state.update_data(custom_condition=custom_condition, achievement_value=0)
+    
+    text = "🎁 <b>Создание приза</b>\n\n"
+    text += f"Условие: {custom_condition}\n\n"
+    text += "Введите эмодзи для приза (или нажмите '🎁 По умолчанию'):"
+    
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 По умолчанию", callback_data="default_emoji")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_prize_creation")]
+    ]))
+    
+    await state.set_state(PrizeManagementStates.waiting_for_prize_emoji)
 
 @dp.message(PrizeManagementStates.waiting_for_achievement_value)
 async def handle_achievement_value(message: Message, state: FSMContext):
@@ -1866,7 +1955,11 @@ async def confirm_prize_creation(message, state: FSMContext):
     data = await state.get_data()
 
     # Получаем achievement_description для отображения
-    achievement_desc = get_achievement_description(data['achievement_type'], data['achievement_value'])
+    achievement_desc = get_achievement_description(
+        data['achievement_type'], 
+        data.get('achievement_value', 0),
+        data.get('custom_condition')
+    )
 
     text = "🎁 <b>Подтверждение создания приза</b>\n\n"
     text += f"🏷️ <b>Название:</b> {data['prize_title']}\n"
@@ -1924,11 +2017,12 @@ async def handle_confirm_create_prize(callback: CallbackQuery, state: FSMContext
         title=data['prize_title'],
         description=data.get('prize_description', ''),
         achievement_type=data['achievement_type'],
-        achievement_value=data['achievement_value'],
+        achievement_value=data.get('achievement_value', 0),
+        custom_condition=data.get('custom_condition'),  # Произвольное условие
         emoji=data.get('prize_emoji', '🎁'),
         is_active=True,
-        created_at=int(datetime.now().timestamp()),
-        updated_at=int(datetime.now().timestamp())
+        created_at=int(datetime.datetime.now().timestamp()),
+        updated_at=int(datetime.datetime.now().timestamp())
     )
 
     # Сохраняем в БД
@@ -2077,14 +2171,14 @@ async def handle_view_all_prizes(callback: CallbackQuery):
     text += f"👑 <b>Призы главного модератора ({len(admin_prizes)}):</b>\n"
     if admin_prizes:
         for prize in admin_prizes:
-            text += f"• {prize.emoji} <b>{prize.title}</b> (ID: {prize.id}) - {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
+            text += f"• {prize.emoji} <b>{prize.title}</b> (ID: {prize.id}) - {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n"
     else:
         text += "   Нет активных призов\n"
 
     text += f"\n📣 <b>Призы блогеров ({len(blogger_prizes)}):</b>\n"
     if blogger_prizes:
         for prize in blogger_prizes:
-            text += f"• {prize.emoji} <b>{prize.title}</b> (ID: {prize.id}, Код: {prize.referral_code}) - {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n"
+            text += f"• {prize.emoji} <b>{prize.title}</b> (ID: {prize.id}, Код: {prize.referral_code}) - {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n"
     else:
         text += "   Нет активных призов\n"
 
