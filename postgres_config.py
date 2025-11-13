@@ -11,7 +11,8 @@ POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "default_db")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "gen_user")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 POSTGRES_SSL_MODE = os.getenv("POSTGRES_SSL_MODE", "verify-full")
-POSTGRES_SSL_ROOT_CERT = os.getenv("POSTGRES_SSL_ROOT_CERT", "ca.crt")
+# Используем значение из env или пустую строку, чтобы не проверять файл если он не указан
+POSTGRES_SSL_ROOT_CERT = os.getenv("POSTGRES_SSL_ROOT_CERT", "")
 
 def get_postgres_connection():
     """Создание подключения к PostgreSQL"""
@@ -41,10 +42,12 @@ def validate_postgres_config():
     if missing_vars:
         raise ValueError(f"Отсутствуют обязательные переменные окружения: {', '.join(missing_vars)}")
 
-    # Проверка существования файла сертификата
-    cert_path = POSTGRES_SSL_ROOT_CERT
-    if not os.path.exists(cert_path):
-        raise FileNotFoundError(f"Файл сертификата не найден: {cert_path}")
+    # Проверка существования файла сертификата (только если SSL режим требует сертификат и путь указан)
+    if POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
+        cert_path = POSTGRES_SSL_ROOT_CERT
+        if cert_path and cert_path.strip():  # Проверяем только если путь указан и не пустой
+            if not os.path.exists(cert_path):
+                raise FileNotFoundError(f"Файл сертификата не найден: {cert_path}")
 
     return True
 

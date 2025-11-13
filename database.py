@@ -17,9 +17,13 @@ class Database:
         self.use_postgres = use_postgres
 
         if self.use_postgres:
-            # Проверяем конфигурацию PostgreSQL
-            validate_postgres_config()
-            logger.info("Используется PostgreSQL база данных")
+            # Проверяем конфигурацию PostgreSQL только если используется PostgreSQL
+            try:
+                validate_postgres_config()
+                logger.info("Используется PostgreSQL база данных")
+            except Exception as e:
+                logger.error(f"Ошибка конфигурации PostgreSQL: {e}")
+                raise
         else:
             logger.info("Используется SQLite база данных")
 

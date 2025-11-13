@@ -24,7 +24,7 @@ from polza_config import (
     POLZA_API_KEY, POLZA_BASE_URL, DEFAULT_MODEL, VISION_MODEL, SYSTEM_PROMPT,
     PHOTO_ANALYSIS_PROMPT, TASK_GENERATION_TEMPLATE
 )
-from subscription_config import SUBSCRIPTION_PLANS
+from subscription_config import SUBSCRIPTION_PLANS, SUBSCRIPTION_LEVELS
 from wata_api import wata_create_payment, wata_check_payment
 
 # Настройка логирования
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Определение состояний FSM
 class UserRegistration(StatesGroup):
+    waiting_for_start_confirmation = State()  # Ожидание подтверждения начала регистрации
     waiting_for_privacy_policy = State()
     waiting_for_name = State()
     waiting_for_birth_date = State()
@@ -51,6 +52,11 @@ class UserRegistration(StatesGroup):
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# Логируем настройки базы данных для отладки
+logger.info(f"USE_POSTGRES из config: {USE_POSTGRES}")
+logger.info(f"DATABASE_PATH: {DATABASE_PATH}")
+
 db = Database(db_path=DATABASE_PATH, use_postgres=USE_POSTGRES)
 
 # Создание роутера для обработки сообщений
@@ -581,19 +587,54 @@ def create_goal_confirmation_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-def create_subscription_keyboard() -> InlineKeyboardMarkup:
-    """Создание inline клавиатуры для выбора подписки"""
-    keyboard = []
-    for months, plan in SUBSCRIPTION_PLANS.items():
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"{plan['description']} - {plan['price']} ₽",
-                callback_data=f"sub_{months}"
-            )
-        ])
-
-
+def create_subscription_level_keyboard(current_level_index: int = 0) -> InlineKeyboardMarkup:
+    """Создание inline клавиатуры для выбора уровня подписки с навигацией"""
+    total_levels = len(SUBSCRIPTION_LEVELS)
+    level = SUBSCRIPTION_LEVELS[current_level_index]
+    
+    # Кнопки навигации
+    nav_buttons = []
+    
+    # Кнопка "Назад" (влево)
+    if current_level_index > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️", callback_data=f"sub_level_{current_level_index - 1}"))
+    else:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️", callback_data="sub_level_disabled"))
+    
+    # Индикатор уровня (текущий из общего количества)
+    nav_buttons.append(InlineKeyboardButton(
+        text=f"{current_level_index + 1}/{total_levels}",
+        callback_data="sub_level_info"
+    ))
+    
+    # Кнопка "Вперед" (вправо)
+    if current_level_index < total_levels - 1:
+        nav_buttons.append(InlineKeyboardButton(text="➡️", callback_data=f"sub_level_{current_level_index + 1}"))
+    else:
+        nav_buttons.append(InlineKeyboardButton(text="➡️", callback_data="sub_level_disabled"))
+    
+    keyboard = [
+        nav_buttons,
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"sub_confirm_{current_level_index}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+    ]
+    
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_subscription_level_text(level_index: int) -> str:
+    """Получение текста описания уровня подписки"""
+    level = SUBSCRIPTION_LEVELS[level_index]
+    
+    features_text = "\n".join(level["features"])
+    
+    text = (
+        f"🎯 <b>Уровень: {level['name']}</b>\n\n"
+        f"⏱ Период: {level['description']}\n"
+        f"💰 Стоимость: {level['price']} ₽\n\n"
+        f"📋 <b>Что включено:</b>\n{features_text}"
+    )
+    
+    return text
 
 def validate_date(date_str: str) -> Optional[date]:
     """Валидация даты рождения в формате ДД.ММ.ГГГГ"""
@@ -637,62 +678,62 @@ async def cmd_start(message: Message, state: FSMContext):
 
         if reg_status['status'] == 'complete':
             # Пользователь полностью зарегистрирован и имеет активную подписку
-        referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
-        goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
+            referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
+            goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
 
-        # Проверяем статус подписки
-        subscription_text = ""
-        if existing_user.subscription_active and existing_user.subscription_end:
-            end_date = datetime.datetime.fromtimestamp(existing_user.subscription_end).strftime('%d.%m.%Y')
-            subscription_text = f"💎 Подписка активна до {end_date}\n"
-        else:
-            subscription_text = "💎 Подписка: Не активна\n"
+            # Проверяем статус подписки
+            subscription_text = ""
+            if existing_user.subscription_active and existing_user.subscription_end:
+                end_date = datetime.datetime.fromtimestamp(existing_user.subscription_end).strftime('%d.%m.%Y')
+                subscription_text = f"💎 Подписка активна до {end_date}\n"
+            else:
+                subscription_text = "💎 Подписка: Не активна\n"
 
-        # Проверяем, есть ли карточка игрока
-        player_stats = await db.get_player_stats(telegram_id)
+            # Проверяем, есть ли карточка игрока
+            player_stats = await db.get_player_stats(telegram_id)
 
-        if player_stats:
-            # У пользователя есть карточка игрока - показываем главное меню
-            user_statistics = await db.get_user_stats(telegram_id)
-            await message.answer(
-                f"С возвращением, {existing_user.name}! 👋\n\n"
-                f"🎮 Ваша игровая карточка активна!\n\n"
-                f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
-                f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
-                f"Готов продолжить приключения?",
-                parse_mode="HTML"
-            )
-            await state.set_state(UserRegistration.main_menu)
-            await show_main_menu(message)
-        else:
-            # У пользователя нет карточки - показываем обычное приветствие
-            stats_text = ""
             if player_stats:
-                stats_text = (
-                    f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
-                    f"⭐ Опыт: {player_stats.experience}\n\n"
-                    f"🏆 <b>Характеристики:</b>\n"
-                    f"💪 Сила: {player_stats.strength}/100\n"
-                    f"🤸 Ловкость: {player_stats.agility}/100\n"
-                    f"🏃 Выносливость: {player_stats.endurance}/100\n"
-                    f"🧠 Интеллект: {player_stats.intelligence}/100\n"
-                    f"✨ Харизма: {player_stats.charisma}/100\n"
+                # У пользователя есть карточка игрока - показываем главное меню
+                user_statistics = await db.get_user_stats(telegram_id)
+                await message.answer(
+                    f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"🎮 Ваша игровая карточка активна!\n\n"
+                    f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
+                    f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
+                    f"Готов продолжить приключения?",
+                    parse_mode="HTML"
                 )
+                await state.set_state(UserRegistration.main_menu)
+                await show_main_menu(message)
+            else:
+                # У пользователя нет карточки - показываем обычное приветствие
+                stats_text = ""
+                if player_stats:
+                    stats_text = (
+                        f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
+                        f"⭐ Опыт: {player_stats.experience}\n\n"
+                        f"🏆 <b>Характеристики:</b>\n"
+                        f"💪 Сила: {player_stats.strength}/100\n"
+                        f"🤸 Ловкость: {player_stats.agility}/100\n"
+                        f"🏃 Выносливость: {player_stats.endurance}/100\n"
+                        f"🧠 Интеллект: {player_stats.intelligence}/100\n"
+                        f"✨ Харизма: {player_stats.charisma}/100\n"
+                    )
 
-            await message.answer(
-                f"С возвращением, {existing_user.name}! 👋\n\n"
-                f"Ты уже в нашей команде изменений!\n\n"
-                f"👤 Имя: {existing_user.name}\n"
-                f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
-                f"📏 Рост: {existing_user.height} см\n"
-                f"⚖️ Вес: {existing_user.weight} кг\n"
-                f"🏙️ Город: {existing_user.city}\n"
-                f"{referral_text}"
-                f"{goal_text}"
-                f"{subscription_text}"
-                f"{stats_text}\n",
-                parse_mode="HTML"
-                )
+                await message.answer(
+                    f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"Ты уже в нашей команде изменений!\n\n"
+                    f"👤 Имя: {existing_user.name}\n"
+                    f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
+                    f"📏 Рост: {existing_user.height} см\n"
+                    f"⚖️ Вес: {existing_user.weight} кг\n"
+                    f"🏙️ Город: {existing_user.city}\n"
+                    f"{referral_text}"
+                    f"{goal_text}"
+                    f"{subscription_text}"
+                    f"{stats_text}\n",
+                    parse_mode="HTML"
+                    )
         elif reg_status['status'] == 'paid_pending':
             # Регистрация завершена, но подписка не оплачена
             await message.answer(
@@ -727,28 +768,40 @@ async def cmd_start(message: Message, state: FSMContext):
         # Получаем имя пользователя из Telegram
         user_name = message.from_user.first_name or "друг"
 
-        # Отправляем приветственное мотивационное сообщение
+        # Отправляем приветственное мотивационное сообщение с кнопкой "Продолжить"
+        await state.set_state(UserRegistration.waiting_for_start_confirmation)
         await message.answer(
-            f"Привет, {user_name}! 👋 Я GoPrime — твой личный мотивационный помощник в Telegram. Я помогу тебе достигать целей шаг за шагом: каждый день буду предлагать простые, но мощные задания, адаптированные под твои приоритеты — фитнес, обучение, карьера, хобби или что-то своё. Расскажи о своей главной цели, и мы сразу начнём! Готов к первым шагам к успеху? 🚀"
-        )
-
-        # Начинаем регистрацию с политики конфиденциальности
-        await state.set_state(UserRegistration.waiting_for_privacy_policy)
-        await message.answer(
-            "🤖 Для начала давайте настроим бота под вас.\n\n"
-            "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
-            "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
-            "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
-            "И нашей политикой обработки персональных данных:\n"
-            "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
-            "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
-            parse_mode="Markdown",
+            f"Привет, {user_name}! 👋 Я GoPrime — твой личный мотивационный помощник в Telegram. Я помогу тебе достигать целей шаг за шагом: каждый день буду предлагать простые, но мощные задания, адаптированные под твои приоритеты — фитнес, обучение, карьера, хобби или что-то своё. Расскажи о своей главной цели, и мы сразу начнём! Готов к первым шагам к успеху? 🚀",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
+                [InlineKeyboardButton(text="▶️ Продолжить", callback_data="start_registration")]
             ])
         )
 
+
+@router.callback_query(lambda c: c.data == "start_registration")
+async def handle_start_registration(callback: CallbackQuery, state: FSMContext):
+    """Обработка нажатия кнопки 'Продолжить' - переход к политике конфиденциальности"""
+    await callback.answer()
+    
+    # Переходим к политике конфиденциальности
+    await state.set_state(UserRegistration.waiting_for_privacy_policy)
+    
+    # Ссылки на документы
+    privacy_policy_url = "https://docs.google.com/document/d/1o4LBBlGi1iy8omOh8c1bLSexxm4MeW3iW4PQZRBRt_A/edit?tab=t.0"
+    user_agreement_url = "https://docs.google.com/document/d/1yjXpk6-H1sA4hkUCwutFBEwHv25--k1zBYZgH16i1Ok/edit?tab=t.0"
+    
+    await callback.message.edit_text(
+        "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
+        "Пожалуйста, ознакомьтесь с нашими документами:\n\n"
+        "Нажимая '✅ Подтверждаю', вы соглашаетесь с условиями.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=privacy_policy_url)],
+            [InlineKeyboardButton(text="📋 Пользовательское соглашение", url=user_agreement_url)],
+            [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
+        ])
+    )
 
 @router.callback_query(lambda c: c.data == "privacy_confirmed")
 async def handle_privacy_confirmed(callback: CallbackQuery, state: FSMContext):
@@ -765,8 +818,11 @@ async def handle_privacy_confirmed(callback: CallbackQuery, state: FSMContext):
     await state.update_data(language="ru")
 
     await state.set_state(UserRegistration.waiting_for_name)
+    await callback.message.edit_text(
+        "✅ Спасибо за подтверждение!",
+        reply_markup=None
+    )
     await callback.message.answer(
-        "✅ Спасибо за подтверждение!\n\n"
         "Теперь введите ваше имя:",
         reply_markup=create_cancel_keyboard()
     )
@@ -814,16 +870,20 @@ async def handle_resume_registration(callback: CallbackQuery, state: FSMContext)
 
     if next_step == 'language':
         await state.set_state(UserRegistration.waiting_for_privacy_policy)
+        
+        # Ссылки на документы
+        privacy_policy_url = "https://docs.google.com/document/d/1o4LBBlGi1iy8omOh8c1bLSexxm4MeW3iW4PQZRBRt_A/edit?tab=t.0"
+        user_agreement_url = "https://docs.google.com/document/d/1yjXpk6-H1sA4hkUCwutFBEwHv25--k1zBYZgH16i1Ok/edit?tab=t.0"
+        
         await callback.message.edit_text(
             "🔄 Продолжаем регистрацию...\n\n"
             "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
-            "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
-            "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
-            "И нашей политикой обработки персональных данных:\n"
-            "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
-            "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
-            parse_mode="Markdown",
+            "Пожалуйста, ознакомьтесь с нашими документами:\n\n"
+            "Нажимая '✅ Подтверждаю', вы соглашаетесь с условиями.",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=privacy_policy_url)],
+                [InlineKeyboardButton(text="📋 Пользовательское соглашение", url=user_agreement_url)],
                 [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
             ])
@@ -915,17 +975,15 @@ async def handle_resume_registration(callback: CallbackQuery, state: FSMContext)
         )
     elif next_step == 'subscription':
         await state.set_state(UserRegistration.waiting_for_subscription)
+        await state.update_data(selected_level_index=0)  # Начинаем с первого уровня
         await callback.message.edit_text(
             f"🔄 Продолжаем регистрацию...\n\n"
             f"👤 Имя: {user.name}\n"
             f"🎯 Цель: {user.goal}\n\n"
-            f"💎 Теперь выберите период подписки:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="1 месяц - 200₽", callback_data="sub_1")],
-                [InlineKeyboardButton(text="3 месяца - 1200₽", callback_data="sub_3")],
-                [InlineKeyboardButton(text="6 месяцев - 3000₽", callback_data="sub_6")],
-                [InlineKeyboardButton(text="12 месяцев - 4000₽", callback_data="sub_12")]
-            ])
+            f"💎 Выберите уровень подписки:\n\n"
+            f"{get_subscription_level_text(0)}",
+            parse_mode="HTML",
+            reply_markup=create_subscription_level_keyboard(0)
         )
 
 @router.callback_query(lambda c: c.data == "restart_registration")
@@ -958,28 +1016,11 @@ async def handle_restart_registration(callback: CallbackQuery, state: FSMContext
     # Начинаем регистрацию заново
     user_name = callback.from_user.first_name or "друг"
 
+    await state.set_state(UserRegistration.waiting_for_start_confirmation)
     await callback.message.edit_text(
-        f"🔄 Начинаем регистрацию заново...\n\n"
-        f"Привет, {user_name}! 👋 Я GoPrime — твой личный мотивационный помощник в Telegram. "
-        f"Я помогу тебе достигать целей шаг за шагом: каждый день буду предлагать простые, "
-        f"но мощные задания, адаптированные под твои приоритеты — фитнес, обучение, карьера, хобби или что-то своё. "
-        f"Расскажи о своей главной цели, и мы сразу начнём! Готов к первым шагам к успеху? 🚀"
-    )
-
-    # Начинаем регистрацию с политики конфиденциальности
-    await state.set_state(UserRegistration.waiting_for_privacy_policy)
-    await callback.message.answer(
-        "🤖 Для начала давайте настроим бота под вас.\n\n"
-        "📋 <b>Политика конфиденциальности и обработка персональных данных</b>\n\n"
-        "Пожалуйста, ознакомьтесь с нашей политикой конфиденциальности:\n"
-        "🔗 [Ссылка на политику конфиденциальности](ссылка_будет_добавлена)\n\n"
-        "И нашей политикой обработки персональных данных:\n"
-        "🔗 [Ссылка на обработку ПД](ссылка_будет_добавлена)\n\n"
-        "Нажимая 'Подтверждаю', вы соглашаетесь с условиями.",
-        parse_mode="Markdown",
+        f"Привет, {user_name}! 👋 Я GoPrime — твой личный мотивационный помощник в Telegram. Я помогу тебе достигать целей шаг за шагом: каждый день буду предлагать простые, но мощные задания, адаптированные под твои приоритеты — фитнес, обучение, карьера, хобби или что-то своё. Расскажи о своей главной цели, и мы сразу начнём! Готов к первым шагам к успеху? 🚀",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтверждаю", callback_data="privacy_confirmed")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="privacy_declined")]
+            [InlineKeyboardButton(text="▶️ Продолжить", callback_data="start_registration")]
         ])
     )
 
@@ -1431,90 +1472,116 @@ async def finalize_registration(message: Message, state: FSMContext, user_id: in
     # Очищаем состояние
     await state.clear()
 
-    referral_text = f"📢 Реферальный код: {referral_code}\n" if referral_code else ""
-
+    # Переходим к выбору подписки без сообщения об успешной регистрации
+    await state.set_state(UserRegistration.waiting_for_subscription)
+    await state.update_data(selected_level_index=0)  # Начинаем с первого уровня
+    
     await message.edit_text(
-        f"🎉 Отлично! Регистрация завершена!\n\n"
-        f"👤 Имя: {name}\n"
-        f"📅 Дата рождения: {data.get('birth_date').strftime('%d.%m.%Y') if data.get('birth_date') else 'Не указана'}\n"
-        f"📏 Рост: {data.get('height')} см\n"
-        f"⚖️ Вес: {data.get('weight')} кг\n"
-        f"🏙️ Город: {data.get('city')}\n"
-        f"{referral_text}"
-        f"🎯 Цель: {data.get('goal')}\n\n"
-        f"💳 Теперь выберите период подписки для доступа к персональным заданиям:",
-        reply_markup=create_subscription_keyboard()
+        f"💎 Выберите уровень подписки:\n\n"
+        f"{get_subscription_level_text(0)}",
+        parse_mode="HTML",
+        reply_markup=create_subscription_level_keyboard(0)
     )
 
-    # Переходим к выбору подписки
-    await state.set_state(UserRegistration.waiting_for_subscription)
-
-@router.callback_query(lambda c: c.data.startswith("sub_"))
-async def process_subscription_choice(callback: CallbackQuery, state: FSMContext):
-    """Обработка выбора периода подписки"""
+@router.callback_query(UserRegistration.waiting_for_subscription, lambda c: c.data.startswith("sub_level_"))
+async def handle_subscription_level_navigation(callback: CallbackQuery, state: FSMContext):
+    """Обработка навигации по уровням подписки"""
     await callback.answer()
-
-    # Получаем выбранный период из callback_data (sub_1, sub_3, etc.)
-    months = int(callback.data.replace("sub_", ""))
-
-    if months not in SUBSCRIPTION_PLANS:
-        await callback.answer("Неверный выбор периода подписки", show_alert=True)
+    
+    if callback.data == "sub_level_disabled":
+        await callback.answer("Это крайний уровень", show_alert=True)
         return
+    
+    if callback.data == "sub_level_info":
+        await callback.answer("Используйте стрелки для переключения уровней", show_alert=True)
+        return
+    
+    # Получаем индекс уровня из callback_data
+    level_index = int(callback.data.replace("sub_level_", ""))
+    
+    if level_index < 0 or level_index >= len(SUBSCRIPTION_LEVELS):
+        await callback.answer("Неверный уровень", show_alert=True)
+        return
+    
+    # Сохраняем выбранный уровень в состоянии
+    await state.update_data(selected_level_index=level_index)
+    
+    # Обновляем сообщение с новым уровнем
+    await callback.message.edit_text(
+        f"💎 Выберите уровень подписки:\n\n"
+        f"{get_subscription_level_text(level_index)}",
+        parse_mode="HTML",
+        reply_markup=create_subscription_level_keyboard(level_index)
+    )
 
-    plan = SUBSCRIPTION_PLANS[months]
+@router.callback_query(UserRegistration.waiting_for_subscription, lambda c: c.data.startswith("sub_confirm_"))
+async def handle_subscription_confirmation(callback: CallbackQuery, state: FSMContext):
+    """Обработка подтверждения выбора уровня подписки"""
+    await callback.answer()
+    
+    # Получаем индекс уровня из callback_data
+    level_index = int(callback.data.replace("sub_confirm_", ""))
+    
+    if level_index < 0 or level_index >= len(SUBSCRIPTION_LEVELS):
+        await callback.answer("Неверный уровень", show_alert=True)
+        return
+    
+    level = SUBSCRIPTION_LEVELS[level_index]
     user_id = callback.from_user.id
-
+    
     # Создаем timestamp
     now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
-
+    
     # Получаем информацию о боте
     bot_info = await bot.get_me()
     bot_name = bot_info.username or "MotivationBot"
-
+    
     # Создаем платеж через WATA API
     result = await wata_create_payment(
         user_mid=user_id,
-        money=plan['price'],
-        months=months,
+        money=level['price'],
+        months=level['months'],
         bot_name=bot_name,
         created_at=now
     )
-
+    
     if result:
         payment_id, payment_link = result
-
+        
         # Сохраняем информацию о платеже в БД
         payment = Payment(
             user_id=user_id,
             payment_id=payment_id,
             order_id=f"{user_id}{now}",
-            amount=plan['price'],
-            months=months,
+            amount=level['price'],
+            months=level['months'],
             status=PaymentStatus.PENDING,
             created_at=now,
             currency="RUB",
             payment_method="WATA",
             subscription_type="standard"
         )
-
+        
         payment_db_id = await db.save_payment(payment)
-
+        
         # Отправляем пользователю ссылку на оплату
-        await callback.message.answer(
-            f"💳 Подписка на {plan['description']}\n"
-            f"💰 Стоимость: {plan['price']} ₽\n\n"
+        await callback.message.edit_text(
+            f"💳 <b>Подписка: {level['name']}</b>\n\n"
+            f"⏱ Период: {level['description']}\n"
+            f"💰 Стоимость: {level['price']} ₽\n\n"
             f"Ссылка для оплаты: {payment_link}\n\n"
             f"⏰ Ссылка действительна 1 час",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="💳 Оплатить", url=payment_link)],
                 [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_payment_{payment_db_id}")]
             ])
         )
-
+        
         # Переходим к состоянию ожидания оплаты
         await state.set_state(UserRegistration.waiting_for_payment)
         await state.update_data(current_payment_id=payment_db_id)
-
+        
     else:
         logger.error(f"Не удалось создать платеж для пользователя {user_id}")
         await callback.message.answer(
@@ -2769,18 +2836,16 @@ async def handle_subscribe(callback: CallbackQuery, state: FSMContext):
     """Обработка оформления подписки"""
     await callback.answer()
 
+    # Переходим к состоянию выбора подписки
+    await state.set_state(UserRegistration.waiting_for_subscription)
+    await state.update_data(selected_level_index=0)  # Начинаем с первого уровня
+
     # Возвращаемся к выбору подписки
-    await callback.message.answer(
-        "💰 <b>Выберите план подписки</b>\n\n"
-        "Все планы дают полный доступ ко всем функциям бота:",
+    await callback.message.edit_text(
+        "💰 <b>Выберите уровень подписки</b>\n\n"
+        f"{get_subscription_level_text(0)}",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="1 месяц - 500 ₽", callback_data="sub_1")],
-            [InlineKeyboardButton(text="3 месяца - 1200 ₽", callback_data="sub_3")],
-            [InlineKeyboardButton(text="6 месяцев - 2200 ₽", callback_data="sub_6")],
-            [InlineKeyboardButton(text="12 месяцев - 4000 ₽", callback_data="sub_12")],
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
-        ])
+        reply_markup=create_subscription_level_keyboard(0)
     )
 
 async def generate_daily_task(user_goal: str) -> str:
@@ -2852,6 +2917,19 @@ async def cmd_help(message: Message):
         "Все данные сохраняются в базе данных и используются для персонализации заданий и отслеживания прогресса."
     )
     await message.answer(help_text)
+
+# Обработчик для состояния ожидания подтверждения начала регистрации
+@router.message(UserRegistration.waiting_for_start_confirmation)
+async def handle_waiting_for_start_confirmation(message: Message, state: FSMContext):
+    """Обработчик сообщений в состоянии ожидания подтверждения начала регистрации"""
+    user_name = message.from_user.first_name or "друг"
+    await message.answer(
+        f"Привет, {user_name}! 👋\n\n"
+        "Пожалуйста, нажмите кнопку '▶️ Продолжить' для начала регистрации.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="▶️ Продолжить", callback_data="start_registration")]
+        ])
+    )
 
 # Обработчик всех остальных сообщений
 @router.message()
@@ -2975,7 +3053,7 @@ async def notification_sender_task():
 
 async def on_startup():
     """Функция, выполняемая при запуске бота"""
-    await db.init_db()
+    # База данных уже инициализирована в main()
     # Запускаем фоновую задачу проверки платежей
     asyncio.create_task(payment_polling_task())
     # Запускаем фоновую задачу отправки уведомлений
@@ -2989,6 +3067,11 @@ async def on_shutdown():
 
 async def main():
     """Главная функция"""
+    # Инициализируем базу данных перед запуском бота
+    logger.info("Инициализация базы данных...")
+    await db.init_db()
+    logger.info("База данных инициализирована")
+    
     # Регистрируем роутер
     dp.include_router(router)
 
