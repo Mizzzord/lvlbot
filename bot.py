@@ -680,6 +680,45 @@ async def cmd_start(message: Message, state: FSMContext):
     existing_user = await db.get_user(telegram_id)
 
     if existing_user:
+        # Сначала проверяем активную подписку (может быть выдана администратором)
+        active_subscription = await db.get_active_subscription(telegram_id)
+        
+        # Проверяем, есть ли карточка игрока
+        player_stats = await db.get_player_stats(telegram_id)
+        
+        # Если есть активная подписка
+        if active_subscription:
+            end_date = datetime.datetime.fromtimestamp(active_subscription.end_date).strftime('%d.%m.%Y')
+            
+            if player_stats:
+                # У пользователя есть карточка - показываем кнопку "Профиль"
+                user_statistics = await db.get_user_stats(telegram_id)
+                await message.answer(
+                    f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"💎 <b>Подписка активна до {end_date}</b>\n\n"
+                    f"🎮 Ваша игровая карточка активна!\n\n"
+                    f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
+                    f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
+                    f"Готов продолжить приключения?",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="👤 Профиль", callback_data="go_to_profile")]
+                    ])
+                )
+            else:
+                # У пользователя нет карточки - показываем кнопку "Продолжить путь"
+                await message.answer(
+                    f"Привет, {existing_user.name}! 👋\n\n"
+                    f"💎 <b>Подписка активна до {end_date}</b>\n\n"
+                    f"🎯 Чтобы начать пользоваться ботом, нужно загрузить своё фото и получить характеристики персонажа.\n\n"
+                    f"Готов продолжить?",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🚀 Продолжить путь", callback_data="continue_path")]
+                    ])
+                )
+            return
+        
         # Определяем статус регистрации
         reg_status = get_registration_status(existing_user)
 
@@ -695,9 +734,6 @@ async def cmd_start(message: Message, state: FSMContext):
                 subscription_text = f"💎 Подписка активна до {end_date}\n"
             else:
                 subscription_text = "💎 Подписка: Не активна\n"
-
-            # Проверяем, есть ли карточка игрока
-            player_stats = await db.get_player_stats(telegram_id)
 
             if player_stats:
                 # У пользователя есть карточка игрока - показываем главное меню
@@ -2098,7 +2134,8 @@ async def handle_profile(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📊 Рейтинг", callback_data="rating")],
         [InlineKeyboardButton(text="📸 Заменить фотографию", callback_data="change_photo")],
         [InlineKeyboardButton(text="💳 Оплата", callback_data="payment_info")],
-        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")]
+        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")],
+        [InlineKeyboardButton(text="⭐ Мои привилегии", callback_data="my_privileges")]
     ])
 
     # Сначала отправляем изображение карточки, если оно существует
@@ -2153,6 +2190,140 @@ async def handle_profile(message: Message, state: FSMContext):
         f"Выберите действие:",
         parse_mode="HTML",
         reply_markup=keyboard
+    )
+
+@router.callback_query(lambda c: c.data == "go_to_profile")
+async def handle_go_to_profile(callback: CallbackQuery, state: FSMContext):
+    """Обработка перехода в профиль из команды /start"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    
+    # Получаем данные пользователя
+    user = await db.get_user(user_id)
+    player_stats = await db.get_player_stats(user_id)
+    user_statistics = await db.get_user_stats(user_id)
+    
+    if not user or not player_stats or not user_statistics:
+        await callback.message.answer(
+            "❌ <b>Ошибка загрузки профиля</b>\n\n"
+            "Попробуйте позже или обратитесь в поддержку.",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+    
+    # Показываем профиль с подменю
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Рейтинг", callback_data="rating")],
+        [InlineKeyboardButton(text="📸 Заменить фотографию", callback_data="change_photo")],
+        [InlineKeyboardButton(text="💳 Оплата", callback_data="payment_info")],
+        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")],
+        [InlineKeyboardButton(text="⭐ Мои привилегии", callback_data="my_privileges")]
+    ])
+    
+    # Сначала отправляем изображение карточки, если оно существует
+    if player_stats.card_image_path and os.path.exists(player_stats.card_image_path):
+        try:
+            photo = FSInputFile(player_stats.card_image_path)
+            await callback.message.answer_photo(
+                photo,
+                caption="🎮 <b>Ваша игровая карточка</b>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить карточку: {e}")
+    
+    # Получаем детальную информацию о ранге
+    rank_info = await db.get_user_rank_info(user_id)
+    
+    # Формируем текст ранга
+    if rank_info:
+        rank_text = (
+            f"🏅 <b>Ранг:</b> {rank_info['current_rank_emoji']} {rank_info['current_rank_name']} ({rank_info['current_rank'].value})\n"
+            f"📈 <b>Прогресс:</b> {rank_info['experience_in_rank']}/{rank_info['experience_in_rank'] + rank_info['experience_to_next_rank']} XP "
+            f"({rank_info['progress_percentage']:.1f}%)\n"
+        )
+        
+        if rank_info['next_rank_info']:
+            next_rank, next_exp = rank_info['next_rank_info']
+            from rank_config import RANK_EMOJIS, RANK_NAMES
+            next_rank_emoji = RANK_EMOJIS.get(next_rank, "")
+            next_rank_name = RANK_NAMES.get(next_rank, str(next_rank))
+            rank_text += f"🎯 <b>Следующий ранг:</b> {next_rank_emoji} {next_rank_name} ({next_exp} XP)\n"
+        else:
+            rank_text += "🏆 <b>Максимальный ранг достигнут!</b>\n"
+    else:
+        rank_text = f"🏅 <b>Ранг:</b> {user_statistics.rank.value}\n"
+    
+    await callback.message.answer(
+        f"👤 <b>Профиль игрока</b>\n\n"
+        f"🏆 <b>Ник:</b> {player_stats.nickname}\n"
+        f"⭐ <b>Опыт:</b> {user_statistics.experience} | 📊 <b>Уровень:</b> {user_statistics.level}\n"
+        f"{rank_text}"
+        f"🔥 <b>Стрик:</b> {user_statistics.current_streak} дней\n"
+        f"🎯 <b>Лучший стрик:</b> {user_statistics.best_streak} дней\n"
+        f"✅ <b>Выполнено заданий:</b> {user_statistics.total_tasks_completed}\n\n"
+        f"🏆 <b>Характеристики:</b>\n"
+        f"💪 Сила: {player_stats.strength}/100\n"
+        f"🤸 Ловкость: {player_stats.agility}/100\n"
+        f"🏃 Выносливость: {player_stats.endurance}/100\n"
+        f"🧠 Интеллект: {player_stats.intelligence}/100\n"
+        f"✨ Харизма: {player_stats.charisma}/100\n\n"
+        f"🎯 <b>Цель:</b> {user.goal if user.goal else 'Не установлена'}\n\n"
+        f"Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    
+    # Показываем главное меню
+    await state.set_state(UserRegistration.main_menu)
+    await show_main_menu(callback.message)
+
+@router.callback_query(lambda c: c.data == "continue_path")
+async def handle_continue_path(callback: CallbackQuery, state: FSMContext):
+    """Обработка кнопки 'Продолжить путь' для загрузки фото"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    
+    # Проверяем, завершена ли регистрация
+    user = await db.get_user(user_id)
+    if not user:
+        await callback.message.answer(
+            "❌ Пользователь не найден. Пожалуйста, начните регистрацию заново.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Начать регистрацию", callback_data="start_registration")]
+            ])
+        )
+        return
+    
+    # Проверяем, есть ли все необходимые данные для создания карточки
+    if not user.name or not user.birth_date or not user.height or not user.weight:
+        # Регистрация не завершена - предлагаем продолжить
+        await callback.message.answer(
+            "📝 Чтобы создать карточку игрока, нужно завершить регистрацию.\n\n"
+            "Продолжить регистрацию?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="▶️ Продолжить регистрацию", callback_data="resume_registration")]
+            ])
+        )
+        return
+    
+    # Переходим к загрузке фото
+    await state.set_state(UserRegistration.waiting_for_player_photo)
+    await callback.message.answer(
+        "🎮 <b>Создание карточки игрока</b>\n\n"
+        "📸 Пожалуйста, загрузите ваше фото для создания игровой карточки.\n"
+        "ИИ проанализирует ваше фото и определит стартовые характеристики:\n"
+        "• 💪 Сила\n"
+        "• 🤸 Ловкость\n"
+        "• 🏃 Выносливость\n"
+        "• 🧠 Интеллект (базовый: 50/100)\n"
+        "• ✨ Харизма (базовый: 50/100)\n\n"
+        "После анализа будет создана ваша уникальная игровая карточка!",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]
+        ])
     )
 
 def get_achievement_description(achievement_type: str, achievement_value: int) -> str:
@@ -2273,13 +2444,8 @@ async def handle_support(message: Message, state: FSMContext):
 
     await message.answer(
         "💬 <b>Поддержка</b>\n\n"
-        "Если у вас возникли вопросы или проблемы:\n\n"
-        "📧 <b>Email:</b> support@motivationbot.com\n"
-        "💭 <b>Telegram:</b> @motivation_support\n"
-        "🌐 <b>Сайт:</b> motivationbot.com/support\n\n"
-        "🕐 <b>Время работы:</b>\n"
-        "Пн-Пт: 9:00 - 18:00 (MSK)\n"
-        "Сб-Вс: 10:00 - 16:00 (MSK)\n\n"
+        "Если у вас возникли вопросы или проблемы, обращайтесь в поддержку:\n\n"
+        "💭 <b>Telegram:</b> @primetexpod\n\n"
         "Мы всегда готовы помочь! 🚀",
         parse_mode="HTML",
         reply_markup=create_main_menu_keyboard()
@@ -2493,7 +2659,8 @@ async def handle_back_to_profile(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="📊 Рейтинг", callback_data="rating")],
         [InlineKeyboardButton(text="📸 Заменить фотографию", callback_data="change_photo")],
         [InlineKeyboardButton(text="💳 Оплата", callback_data="payment_info")],
-        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")]
+        [InlineKeyboardButton(text="🎯 Сменить цель", callback_data="change_goal")],
+        [InlineKeyboardButton(text="⭐ Мои привилегии", callback_data="my_privileges")]
     ])
 
     # Сначала отправляем изображение карточки, если оно существует
@@ -2522,6 +2689,65 @@ async def handle_back_to_profile(callback: CallbackQuery, state: FSMContext):
             parse_mode="HTML",
             reply_markup=keyboard
         )
+
+@router.callback_query(lambda c: c.data == "my_privileges")
+async def handle_my_privileges(callback: CallbackQuery, state: FSMContext):
+    """Обработка просмотра привилегий подписки"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    
+    # Получаем активную подписку пользователя
+    active_subscription = await db.get_active_subscription(user_id)
+    
+    if not active_subscription:
+        await callback.message.answer(
+            "❌ <b>Подписка не активна</b>\n\n"
+            "У вас нет активной подписки. Оформите подписку, чтобы получить привилегии.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💰 Оформить подписку", callback_data="subscribe")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_profile")]
+            ])
+        )
+        return
+    
+    # Получаем уровень подписки
+    subscription_level = active_subscription.subscription_level
+    
+    # Находим информацию об уровне подписки
+    level_info = None
+    for level in SUBSCRIPTION_LEVELS:
+        if level['level'] == subscription_level:
+            level_info = level
+            break
+    
+    if not level_info:
+        # Fallback на уровень 1, если не найден
+        level_info = SUBSCRIPTION_LEVELS[0]
+    
+    # Формируем текст привилегий
+    privileges_text = f"⭐ <b>Мои привилегии</b>\n\n"
+    privileges_text += f"📦 <b>Уровень подписки:</b> {level_info['name']}\n"
+    privileges_text += f"⏱ <b>Период:</b> {level_info['description']}\n\n"
+    privileges_text += f"🎁 <b>Ваши привилегии:</b>\n\n"
+    
+    # Добавляем список привилегий
+    for feature in level_info['features']:
+        privileges_text += f"{feature}\n"
+    
+    # Добавляем контакт специальной поддержки для уровней 2 и 3
+    if subscription_level >= 2:
+        privileges_text += f"\n💬 <b>Специальная поддержка:</b>\n"
+        privileges_text += f"Telegram: @primetexpod\n"
+        privileges_text += f"Для пользователей уровня {level_info['name']} доступна приоритетная поддержка!"
+    
+    await callback.message.answer(
+        privileges_text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_profile")]
+        ])
+    )
 
 @router.callback_query(lambda c: c.data == "change_photo")
 async def handle_change_photo(callback: CallbackQuery, state: FSMContext):
