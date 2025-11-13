@@ -2837,7 +2837,8 @@ async def handle_subscription_level_selection(callback: CallbackQuery, state: FS
         subscription_start=subscription_start,
         subscription_end=subscription_end,
         months=level['months'],
-        level_name=level['name']
+        level_name=level['name'],
+        subscription_level=level['level']  # Сохраняем уровень подписки
     )
     
     # Показываем информацию для подтверждения
@@ -2879,6 +2880,9 @@ async def handle_confirm_grant_subscription(callback: CallbackQuery, state: FSMC
         return
     
     try:
+        # Получаем уровень подписки из данных состояния
+        subscription_level = data.get('subscription_level', 1)
+        
         # Создаем запись о подписке
         subscription = Subscription(
             user_id=target_user_id,
@@ -2886,6 +2890,7 @@ async def handle_confirm_grant_subscription(callback: CallbackQuery, state: FSMC
             start_date=subscription_start,
             end_date=subscription_end,
             months=months,
+            subscription_level=subscription_level,
             status=SubscriptionStatus.ACTIVE,
             auto_renew=False,
             created_at=subscription_start,

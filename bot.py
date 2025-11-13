@@ -25,6 +25,13 @@ from polza_config import (
     PHOTO_ANALYSIS_PROMPT, TASK_GENERATION_TEMPLATE
 )
 from subscription_config import SUBSCRIPTION_PLANS, SUBSCRIPTION_LEVELS
+
+# Конфигурация дней неактивности по уровням подписки
+INACTIVITY_DAYS_BY_LEVEL = {
+    1: 2,  # Стартовый - 2 дня
+    2: 3,  # Продвинутый - 3 дня
+    3: 4   # Мастер - 4 дня
+}
 from wata_api import wata_create_payment, wata_check_payment
 
 # Настройка логирования
@@ -1559,7 +1566,8 @@ async def handle_subscription_confirmation(callback: CallbackQuery, state: FSMCo
             created_at=now,
             currency="RUB",
             payment_method="WATA",
-            subscription_type="standard"
+            subscription_type="standard",
+            subscription_level=level['level']  # Сохраняем уровень подписки
         )
         
         payment_db_id = await db.save_payment(payment)
@@ -1653,12 +1661,24 @@ async def check_payment_callback(callback: CallbackQuery, state: FSMContext):
             else:
                 subscription_end = subscription_start + new_subscription_duration
 
+            # Определяем уровень подписки из payment
+            subscription_level = getattr(payment, 'subscription_level', None) or 1
+            if not subscription_level:
+                # Fallback: определяем по месяцам для старых платежей
+                if payment.months >= 12:
+                    subscription_level = 3
+                elif payment.months >= 3:
+                    subscription_level = 2
+                else:
+                    subscription_level = 1
+            
             subscription = Subscription(
                 user_id=payment.user_id,
                 payment_id=payment.id,
                 start_date=subscription_start,
                 end_date=subscription_end,
                 months=payment.months,
+                subscription_level=subscription_level,
                 status=SubscriptionStatus.ACTIVE,
                 auto_renew=False,
                 created_at=current_time,
@@ -1910,6 +1930,16 @@ async def handle_get_task(message: Message, state: FSMContext):
     user_id = message.from_user.id
     logger.info(f"Пользователь {user_id} запросил получение задания")
 
+    # Проверяем активную подписку
+    is_active, error_msg = await check_user_subscription(user_id)
+    if not is_active:
+        await message.answer(
+            error_msg,
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+
     # Проверяем, есть ли уже активное задание
     active_task = await db.get_active_daily_task(user_id)
     if active_task:
@@ -1992,6 +2022,16 @@ async def handle_get_task(message: Message, state: FSMContext):
 async def handle_active_tasks(message: Message, state: FSMContext):
     """Обработка просмотра активных заданий"""
     user_id = message.from_user.id
+
+    # Проверяем активную подписку
+    is_active, error_msg = await check_user_subscription(user_id)
+    if not is_active:
+        await message.answer(
+            error_msg,
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
 
     # Получаем активное задание
     active_task = await db.get_active_daily_task(user_id)
@@ -2259,6 +2299,16 @@ async def handle_task_submission_video(message: Message, state: FSMContext):
 async def handle_task_submission(message: Message, state: FSMContext, media_type: str):
     """Обработка отправки медиафайла для сдачи задания"""
     user_id = message.from_user.id
+
+    # Проверяем активную подписку
+    is_active, error_msg = await check_user_subscription(user_id)
+    if not is_active:
+        await message.answer(
+            error_msg,
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
 
     # Получаем активное задание пользователя
     active_task = await db.get_active_daily_task(user_id)
@@ -2895,6 +2945,35 @@ async def generate_daily_task(user_goal: str) -> str:
         logger.error(f"Error generating daily task: {e}")
         return f"Сделать шаг к цели: {user_goal[:50]}..."
 
+@router.message(Command("subscribe"))
+async def cmd_subscribe(message: Message, state: FSMContext):
+    """Обработчик команды /subscribe для оформления подписки"""
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await message.answer(
+            "❌ Пользователь не найден. Используйте /start для начала регистрации.",
+            parse_mode="HTML"
+        )
+        return
+    
+    if not user.is_complete:
+        await message.answer(
+            "❌ Регистрация не завершена. Завершите регистрацию, чтобы оформить подписку.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Переходим к выбору уровня подписки
+    await state.update_data(selected_level_index=0)
+    await message.answer(
+        f"💎 Выберите уровень подписки:\n\n{get_subscription_level_text(0)}",
+        parse_mode="HTML",
+        reply_markup=create_subscription_level_keyboard(0)
+    )
+    await state.set_state(UserRegistration.waiting_for_subscription)
+
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Обработчик команды помощи"""
@@ -2903,6 +2982,7 @@ async def cmd_help(message: Message):
         "Я — твой личный мотивационный помощник! Помогаю достигать целей через ежедневные задания.\n\n"
         "📋 <b>Команды:</b>\n"
         "/start - Начать регистрацию или проверить статус\n"
+        "/subscribe - Оформить или продлить подписку\n"
         "/cancel - Отменить текущую регистрацию\n"
         "/help - Показать эту справку\n\n"
         "📝 <b>Что собирает бот для персонализации:</b>\n"
@@ -2981,12 +3061,24 @@ async def payment_polling_task():
                     else:
                         subscription_end = subscription_start + new_subscription_duration
 
+                    # Определяем уровень подписки из payment
+                    subscription_level = getattr(payment, 'subscription_level', None) or 1
+                    if not subscription_level:
+                        # Fallback: определяем по месяцам для старых платежей
+                        if payment.months >= 12:
+                            subscription_level = 3
+                        elif payment.months >= 3:
+                            subscription_level = 2
+                        else:
+                            subscription_level = 1
+                    
                     subscription = Subscription(
                         user_id=payment.user_id,
                         payment_id=payment.id,
                         start_date=subscription_start,
                         end_date=subscription_end,
                         months=payment.months,
+                        subscription_level=subscription_level,
                         status=SubscriptionStatus.ACTIVE,
                         auto_renew=False,
                         created_at=current_time,
@@ -3051,6 +3143,150 @@ async def notification_sender_task():
             logger.error(f"[notification_sender_task] Error: {e}")
             await asyncio.sleep(60)  # При ошибке ждем минуту
 
+def get_subscription_level_by_months(months: int) -> int:
+    """Определение уровня подписки по количеству месяцев"""
+    # Находим соответствующий уровень по месяцам
+    for level in SUBSCRIPTION_LEVELS:
+        if level['months'] == months:
+            return level['level']
+    # Если не найден точный уровень, определяем по ближайшему
+    if months >= 12:
+        return 3  # Мастер
+    elif months >= 3:
+        return 2  # Продвинутый
+    else:
+        return 1  # Стартовый
+
+async def experience_reset_task():
+    """Фоновая задача для сброса опыта неактивным пользователям"""
+    logger.info("Запущена задача сброса опыта неактивным пользователям")
+    
+    while True:
+        try:
+            # Получаем всех пользователей с активной подпиской
+            subscribed_users = await db.get_all_active_subscribed_users()
+            current_time = int(datetime.datetime.now().timestamp())
+            
+            reset_count = 0
+            
+            for user_data in subscribed_users:
+                user_id = user_data['user_id']
+                subscription_level = user_data['subscription_level']
+                last_task_date = user_data['last_task_date']
+                
+                # Получаем разрешенное количество дней неактивности
+                allowed_inactivity_days = INACTIVITY_DAYS_BY_LEVEL.get(subscription_level, 2)
+                
+                # Если у пользователя нет last_task_date, пропускаем (новый пользователь)
+                if not last_task_date:
+                    continue
+                
+                # Вычисляем количество дней с последнего задания
+                days_since_last_task = (current_time - last_task_date) / (24 * 60 * 60)
+                
+                # Если прошло больше дней, чем разрешено - сбрасываем опыт
+                if days_since_last_task > allowed_inactivity_days:
+                    # Получаем текущую статистику пользователя
+                    user_stats = await db.get_user_stats(user_id)
+                    if user_stats and user_stats.experience > 0:
+                        # Сбрасываем опыт
+                        await db.reset_user_experience(user_id)
+                        reset_count += 1
+                        
+                        # Отправляем уведомление пользователю
+                        try:
+                            level_name = SUBSCRIPTION_LEVELS[subscription_level - 1]['name']
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text=f"⚠️ <b>Опыт сброшен</b>\n\n"
+                                     f"Вы не выполняли задания более {allowed_inactivity_days} дней.\n"
+                                     f"Согласно правилам уровня подписки '{level_name}', ваш опыт был сброшен до 0.\n\n"
+                                     f"Начните выполнять задания снова, чтобы заработать новый опыт!",
+                                parse_mode="HTML"
+                            )
+                            logger.info(f"Опыт пользователя {user_id} сброшен. Дней неактивности: {days_since_last_task:.1f}, разрешено: {allowed_inactivity_days}")
+                        except Exception as e:
+                            logger.error(f"Не удалось отправить уведомление пользователю {user_id} о сбросе опыта: {e}")
+            
+            if reset_count > 0:
+                logger.info(f"Сброшен опыт {reset_count} неактивным пользователям")
+            
+            # Проверяем каждые 6 часов (21600 секунд)
+            await asyncio.sleep(21600)
+            
+        except Exception as e:
+            logger.error(f"[experience_reset_task] Error: {e}")
+            await asyncio.sleep(3600)  # При ошибке ждем час
+
+async def subscription_warning_task():
+    """Фоновая задача для предупреждения пользователей об окончании подписки"""
+    logger.info("Запущена задача предупреждений об окончании подписки")
+    
+    # Словарь для отслеживания отправленных предупреждений (user_id -> timestamp)
+    sent_warnings = {}
+    
+    while True:
+        try:
+            # Получаем подписки, которые истекают через 3 дня
+            expiring_subscriptions = await db.get_subscriptions_expiring_soon(days_before=3)
+            current_time = int(datetime.datetime.now().timestamp())
+            
+            for sub_data in expiring_subscriptions:
+                user_id = sub_data['user_id']
+                end_date = sub_data['end_date']
+                
+                # Вычисляем количество дней до окончания
+                days_until_expiry = (end_date - current_time) / (24 * 60 * 60)
+                
+                # Отправляем предупреждение только если до окончания 2.5-3.5 дня (чтобы не дублировать)
+                if 2.5 <= days_until_expiry <= 3.5:
+                    # Проверяем, не отправляли ли мы уже предупреждение этому пользователю
+                    last_warning_time = sent_warnings.get(user_id, 0)
+                    # Отправляем предупреждение не чаще раза в день
+                    if current_time - last_warning_time > 24 * 60 * 60:
+                        try:
+                            end_date_str = datetime.datetime.fromtimestamp(end_date).strftime('%d.%m.%Y')
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text=f"⚠️ <b>Важная информация о подписке</b>\n\n"
+                                     f"Ваша подписка истекает через 3 дня ({end_date_str}).\n\n"
+                                     f"Чтобы продолжить пользоваться всеми функциями бота, необходимо продлить подписку.\n\n"
+                                     f"💎 Используйте команду /subscribe для продления подписки.",
+                                parse_mode="HTML"
+                            )
+                            sent_warnings[user_id] = current_time
+                            logger.info(f"Отправлено предупреждение об окончании подписки пользователю {user_id}")
+                        except Exception as e:
+                            logger.error(f"Не удалось отправить предупреждение пользователю {user_id}: {e}")
+            
+            # Проверяем каждые 6 часов
+            await asyncio.sleep(21600)
+            
+        except Exception as e:
+            logger.error(f"[subscription_warning_task] Error: {e}")
+            await asyncio.sleep(3600)  # При ошибке ждем час
+
+async def check_user_subscription(user_id: int) -> tuple[bool, Optional[str]]:
+    """
+    Проверка активной подписки пользователя
+    Возвращает (is_active, error_message)
+    """
+    user = await db.get_user(user_id)
+    if not user:
+        return False, "❌ Пользователь не найден в системе."
+    
+    if not user.subscription_active:
+        return False, "❌ <b>Подписка не активна</b>\n\nДля доступа ко всем функциям бота необходимо оформить подписку.\n\nИспользуйте команду /subscribe для оформления подписки."
+    
+    if not user.subscription_end:
+        return False, "❌ <b>Ошибка данных подписки</b>\n\nОбратитесь в поддержку."
+    
+    current_time = int(datetime.datetime.now().timestamp())
+    if user.subscription_end <= current_time:
+        return False, "❌ <b>Подписка истекла</b>\n\nДля продолжения использования бота необходимо продлить подписку.\n\nИспользуйте команду /subscribe для продления подписки."
+    
+    return True, None
+
 async def on_startup():
     """Функция, выполняемая при запуске бота"""
     # База данных уже инициализирована в main()
@@ -3058,8 +3294,12 @@ async def on_startup():
     asyncio.create_task(payment_polling_task())
     # Запускаем фоновую задачу отправки уведомлений
     asyncio.create_task(notification_sender_task())
+    # Запускаем фоновую задачу сброса опыта неактивным пользователям
+    asyncio.create_task(experience_reset_task())
+    # Запускаем фоновую задачу предупреждений об окончании подписки
+    asyncio.create_task(subscription_warning_task())
     logger.info("Бот запущен и готов к работе")
-    logger.info("Зарегистрированные handlers: check_payment_callback, notification_sender_task")
+    logger.info("Зарегистрированные handlers: check_payment_callback, notification_sender_task, experience_reset_task, subscription_warning_task")
 
 async def on_shutdown():
     """Функция, выполняемая при остановке бота"""

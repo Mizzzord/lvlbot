@@ -73,6 +73,7 @@ class Subscription:
     start_date: int = 0  # timestamp начала
     end_date: int = 0  # timestamp окончания
     months: int = 0
+    subscription_level: int = 1  # уровень подписки (1, 2 или 3)
     status: SubscriptionStatus = SubscriptionStatus.PENDING
     auto_renew: bool = False
     created_at: int = 0  # timestamp создания

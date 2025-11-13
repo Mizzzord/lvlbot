@@ -88,6 +88,7 @@ class Database:
                     start_date INTEGER,
                     end_date INTEGER,
                     months INTEGER,
+                    subscription_level INTEGER DEFAULT 1,
                     status TEXT DEFAULT 'pending',
                     auto_renew BOOLEAN DEFAULT FALSE,
                     created_at INTEGER,
@@ -96,6 +97,17 @@ class Database:
                     FOREIGN KEY (payment_id) REFERENCES payments (id)
                 )
             ''')
+            
+            # Добавляем колонку subscription_level если её нет (миграция для существующих БД)
+            try:
+                cursor = await db.execute("PRAGMA table_info(subscriptions)")
+                columns = [row[1] for row in await cursor.fetchall()]
+                if 'subscription_level' not in columns:
+                    await db.execute('ALTER TABLE subscriptions ADD COLUMN subscription_level INTEGER DEFAULT 1')
+                    await db.commit()
+                    logger.info("Добавлена колонка subscription_level в таблицу subscriptions")
+            except Exception as e:
+                logger.warning(f"Не удалось добавить колонку subscription_level: {e}")
 
             # Создаем таблицу статов игрока
             await db.execute('''
@@ -965,21 +977,45 @@ class Database:
     async def save_subscription(self, subscription: Subscription) -> int:
         """Сохранение подписки в базу данных"""
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute('''
-                INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
-                                          auto_renew, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                subscription.user_id,
-                subscription.payment_id,
-                subscription.start_date,
-                subscription.end_date,
-                subscription.months,
-                subscription.status.value,
-                subscription.auto_renew,
-                subscription.created_at,
-                subscription.updated_at
-            ))
+            # Проверяем наличие колонки subscription_level
+            cursor = await db.execute("PRAGMA table_info(subscriptions)")
+            columns = [row[1] for row in await cursor.fetchall()]
+            has_subscription_level = 'subscription_level' in columns
+            
+            if has_subscription_level:
+                cursor = await db.execute('''
+                    INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, subscription_level, status,
+                                              auto_renew, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    subscription.user_id,
+                    subscription.payment_id,
+                    subscription.start_date,
+                    subscription.end_date,
+                    subscription.months,
+                    subscription.subscription_level,
+                    subscription.status.value,
+                    subscription.auto_renew,
+                    subscription.created_at,
+                    subscription.updated_at
+                ))
+            else:
+                # Fallback для старых версий БД
+                cursor = await db.execute('''
+                    INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
+                                              auto_renew, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    subscription.user_id,
+                    subscription.payment_id,
+                    subscription.start_date,
+                    subscription.end_date,
+                    subscription.months,
+                    subscription.status.value,
+                    subscription.auto_renew,
+                    subscription.created_at,
+                    subscription.updated_at
+                ))
             subscription_id = cursor.lastrowid
             await db.commit()
             logger.info(f"Подписка {subscription_id} для пользователя {subscription.user_id} сохранена")
@@ -998,6 +1034,20 @@ class Database:
 
             row = await cursor.fetchone()
             if row:
+                # Проверяем наличие колонки subscription_level
+                subscription_level = 1  # По умолчанию
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                except (KeyError, IndexError):
+                    # Колонка отсутствует в старых версиях БД, определяем по месяцам
+                    months = row['months']
+                    if months >= 12:
+                        subscription_level = 3
+                    elif months >= 3:
+                        subscription_level = 2
+                    else:
+                        subscription_level = 1
+                
                 return Subscription(
                     id=row['id'],
                     user_id=row['user_id'],
@@ -1005,6 +1055,7 @@ class Database:
                     start_date=row['start_date'],
                     end_date=row['end_date'],
                     months=row['months'],
+                    subscription_level=subscription_level,
                     status=SubscriptionStatus(row['status']),
                     auto_renew=bool(row['auto_renew']),
                     created_at=row['created_at'],
@@ -1026,6 +1077,20 @@ class Database:
             subscriptions = []
 
             for row in rows:
+                # Проверяем наличие колонки subscription_level
+                subscription_level = 1  # По умолчанию
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                except (KeyError, IndexError):
+                    # Колонка отсутствует в старых версиях БД, определяем по месяцам
+                    months = row['months']
+                    if months >= 12:
+                        subscription_level = 3
+                    elif months >= 3:
+                        subscription_level = 2
+                    else:
+                        subscription_level = 1
+                
                 subscriptions.append(Subscription(
                     id=row['id'],
                     user_id=row['user_id'],
@@ -1033,6 +1098,7 @@ class Database:
                     start_date=row['start_date'],
                     end_date=row['end_date'],
                     months=row['months'],
+                    subscription_level=subscription_level,
                     status=SubscriptionStatus(row['status']),
                     auto_renew=bool(row['auto_renew']),
                     created_at=row['created_at'],
@@ -1380,6 +1446,125 @@ class Database:
         # Если есть реферальный код, referral_rank равен обычному rank
         user_stats.referral_rank = user_stats.rank
         await self.save_user_stats(user_stats)
+
+    async def reset_user_experience(self, user_id: int):
+        """Сброс опыта пользователя до 0"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Сбрасываем опыт в user_stats
+            await db.execute('''
+                UPDATE user_stats
+                SET experience = 0, level = 1, rank = 'F', updated_at = ?
+                WHERE user_id = ?
+            ''', (int(datetime.datetime.now().timestamp()), user_id))
+            
+            # Сбрасываем опыт в player_stats
+            await db.execute('''
+                UPDATE player_stats
+                SET experience = 0, updated_at = ?
+                WHERE user_id = ?
+            ''', (int(datetime.datetime.now().timestamp()), user_id))
+            
+            await db.commit()
+            logger.info(f"Опыт пользователя {user_id} сброшен до 0")
+
+    async def get_subscriptions_expiring_soon(self, days_before: int = 3) -> list[dict]:
+        """Получение подписок, которые истекают через указанное количество дней"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            current_time = int(datetime.datetime.now().timestamp())
+            target_time = current_time + (days_before * 24 * 60 * 60)
+            
+            # Получаем подписки, которые истекают через указанное количество дней (±1 день для точности)
+            cursor = await db.execute('''
+                SELECT DISTINCT 
+                    u.telegram_id,
+                    s.end_date,
+                    s.subscription_level
+                FROM users u
+                JOIN subscriptions s ON u.telegram_id = s.user_id
+                WHERE u.subscription_active = 1 
+                AND s.status = 'active'
+                AND s.end_date > ?
+                AND s.end_date <= ?
+                AND s.id = (
+                    SELECT id FROM subscriptions s2 
+                    WHERE s2.user_id = u.telegram_id 
+                    AND s2.status = 'active' 
+                    AND s2.end_date > ?
+                    ORDER BY s2.end_date DESC 
+                    LIMIT 1
+                )
+            ''', (current_time, target_time, current_time))
+            
+            rows = await cursor.fetchall()
+            result = []
+            for row in rows:
+                subscription_level = 1
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                except (KeyError, IndexError):
+                    subscription_level = 1
+                
+                result.append({
+                    'user_id': row['telegram_id'],
+                    'end_date': row['end_date'],
+                    'subscription_level': subscription_level
+                })
+            return result
+
+    async def get_all_active_subscribed_users(self) -> list[dict]:
+        """Получение всех пользователей с активной подпиской"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            current_time = int(datetime.datetime.now().timestamp())
+            # Получаем пользователей с активной подпиской, используя самую актуальную подписку
+            cursor = await db.execute('''
+                SELECT DISTINCT 
+                    u.telegram_id, 
+                    s.subscription_level,
+                    us.last_task_date
+                FROM users u
+                JOIN subscriptions s ON u.telegram_id = s.user_id
+                LEFT JOIN user_stats us ON u.telegram_id = us.user_id
+                WHERE u.subscription_active = 1 
+                AND s.status = 'active'
+                AND s.end_date > ?
+                AND s.id = (
+                    SELECT id FROM subscriptions s2 
+                    WHERE s2.user_id = u.telegram_id 
+                    AND s2.status = 'active' 
+                    AND s2.end_date > ?
+                    ORDER BY s2.end_date DESC 
+                    LIMIT 1
+                )
+            ''', (current_time, current_time))
+            
+            rows = await cursor.fetchall()
+            result = []
+            for row in rows:
+                # Проверяем наличие колонки subscription_level
+                subscription_level = 1  # По умолчанию
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                except (KeyError, IndexError):
+                    # Колонка отсутствует в старых версиях БД, определяем по месяцам
+                    try:
+                        months = row['months']
+                        if months >= 12:
+                            subscription_level = 3
+                        elif months >= 3:
+                            subscription_level = 2
+                        else:
+                            subscription_level = 1
+                    except (KeyError, IndexError):
+                        subscription_level = 1
+                
+                result.append({
+                    'user_id': row['telegram_id'],
+                    'subscription_level': subscription_level,
+                    'last_task_date': row['last_task_date']
+                })
+            return result
 
     # Методы для работы с рангами
 
