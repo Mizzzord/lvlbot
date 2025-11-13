@@ -28,7 +28,9 @@ from moderator_config import (
     DATABASE_PATH, LOG_LEVEL, LOG_FILE
 )
 from database import Database
-from models import Prize, PrizeType, Rank
+from models import Prize, PrizeType, Rank, Subscription, SubscriptionStatus
+from subscription_config import SUBSCRIPTION_LEVELS
+import datetime
 
 # Настройки логирования
 logging.basicConfig(
@@ -121,6 +123,11 @@ class PrizeManagementStates(StatesGroup):
 class UserSearchStates(StatesGroup):
     waiting_for_user_id = State()
 
+class SubscriptionGrantStates(StatesGroup):
+    waiting_for_user_id = State()
+    waiting_for_level_selection = State()
+    confirming_subscription = State()
+
 def create_admin_keyboard() -> ReplyKeyboardMarkup:
     """Создание клавиатуры для главного модератора"""
     keyboard = [
@@ -128,6 +135,7 @@ def create_admin_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="👥 Статистика пользователей")],
         [KeyboardButton(text="📊 Общая статистика")],
         [KeyboardButton(text="🔍 Поиск пользователя")],
+        [KeyboardButton(text="💎 Выдать подписку")],
         [KeyboardButton(text="🛡️ Управление модераторами"), KeyboardButton(text="📣 Управление блогерами")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -656,13 +664,14 @@ async def handle_moderator_stats(message: Message):
 
 # Обработчики для управления модераторами (только для админов)
 
-@dp.message(F.text == "🛡️ Управление модераторами")
-async def handle_admin_moderators(message: Message):
-    """Управление модераторами для главного модератора"""
-    user_id = message.from_user.id
-
+async def show_admin_moderators_menu(user_id: int, message_or_callback):
+    """Показ меню управления модераторами (универсальная функция)"""
+    # Проверяем доступ
     if await get_user_role(user_id) != ModeratorRole.ADMIN:
-        await message.answer("❌ У вас нет доступа к этой функции.")
+        if hasattr(message_or_callback, 'answer'):
+            await message_or_callback.answer("❌ У вас нет доступа к этой функции.")
+        elif hasattr(message_or_callback, 'message'):
+            await message_or_callback.message.answer("❌ У вас нет доступа к этой функции.")
         return
 
     # Получаем список модераторов
@@ -689,15 +698,29 @@ async def handle_admin_moderators(message: Message):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
     ])
 
-    await message.answer(text, reply_markup=keyboard)
+    # Определяем, как отправлять сообщение
+    if isinstance(message_or_callback, Message):
+        await message_or_callback.answer(text, reply_markup=keyboard)
+    elif hasattr(message_or_callback, 'message'):
+        # Это CallbackQuery
+        await message_or_callback.message.edit_text(text, reply_markup=keyboard)
+    else:
+        # Fallback
+        await message_or_callback.answer(text, reply_markup=keyboard)
 
-@dp.message(F.text == "📣 Управление блогерами")
-async def handle_admin_bloggers(message: Message):
-    """Управление блогерами для главного модератора"""
-    user_id = message.from_user.id
+@dp.message(F.text == "🛡️ Управление модераторами")
+async def handle_admin_moderators(message: Message):
+    """Управление модераторами для главного модератора"""
+    await show_admin_moderators_menu(message.from_user.id, message)
 
+async def show_admin_bloggers_menu(user_id: int, message_or_callback):
+    """Показ меню управления блогерами (универсальная функция)"""
+    # Проверяем доступ
     if await get_user_role(user_id) != ModeratorRole.ADMIN:
-        await message.answer("❌ У вас нет доступа к этой функции.")
+        if hasattr(message_or_callback, 'answer'):
+            await message_or_callback.answer("❌ У вас нет доступа к этой функции.")
+        elif hasattr(message_or_callback, 'message'):
+            await message_or_callback.message.answer("❌ У вас нет доступа к этой функции.")
         return
 
     # Получаем список блогеров
@@ -725,7 +748,20 @@ async def handle_admin_bloggers(message: Message):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
     ])
 
-    await message.answer(text, reply_markup=keyboard)
+    # Определяем, как отправлять сообщение
+    if isinstance(message_or_callback, Message):
+        await message_or_callback.answer(text, reply_markup=keyboard)
+    elif hasattr(message_or_callback, 'message'):
+        # Это CallbackQuery
+        await message_or_callback.message.edit_text(text, reply_markup=keyboard)
+    else:
+        # Fallback
+        await message_or_callback.answer(text, reply_markup=keyboard)
+
+@dp.message(F.text == "📣 Управление блогерами")
+async def handle_admin_bloggers(message: Message):
+    """Управление блогерами для главного модератора"""
+    await show_admin_bloggers_menu(message.from_user.id, message)
 
 # Общий обработчик для управления призами
 @dp.message(F.text == "🎁 Управление призами")
@@ -2542,15 +2578,13 @@ async def handle_confirm_add_blogger(callback: CallbackQuery, state: FSMContext)
 async def handle_back_to_moderators(callback: CallbackQuery):
     """Возврат к управлению модераторами"""
     await callback.answer()
-    # Имитируем вызов функции handle_admin_moderators
-    await handle_admin_moderators(callback.message)
+    await show_admin_moderators_menu(callback.from_user.id, callback)
 
 @dp.callback_query(lambda c: c.data == "back_to_bloggers")
 async def handle_back_to_bloggers(callback: CallbackQuery):
     """Возврат к управлению блогерами"""
     await callback.answer()
-    # Имитируем вызов функции handle_admin_bloggers
-    await handle_admin_bloggers(callback.message)
+    await show_admin_bloggers_menu(callback.from_user.id, callback)
 
 # Обработчики отмены для управления персоналом
 @dp.callback_query(lambda c: c.data == "cancel_add_moderator")
@@ -2560,7 +2594,7 @@ async def handle_cancel_add_moderator(callback: CallbackQuery, state: FSMContext
     await callback.message.edit_text("❌ Добавление модератора отменено.")
     await state.clear()
     # Возвращаемся к управлению модераторами
-    await handle_admin_moderators(callback.message)
+    await show_admin_moderators_menu(callback.from_user.id, callback)
 
 @dp.callback_query(lambda c: c.data == "cancel_add_blogger")
 async def handle_cancel_add_blogger(callback: CallbackQuery, state: FSMContext):
@@ -2569,7 +2603,275 @@ async def handle_cancel_add_blogger(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Добавление блогера отменено.")
     await state.clear()
     # Возвращаемся к управлению блогерами
-    await handle_admin_bloggers(callback.message)
+    await show_admin_bloggers_menu(callback.from_user.id, callback)
+
+# Обработчики для выдачи подписки
+@dp.message(F.text == "💎 Выдать подписку")
+async def handle_grant_subscription(message: Message, state: FSMContext):
+    """Обработка выдачи подписки пользователю"""
+    user_id = message.from_user.id
+    
+    # Проверяем, что это главный модератор
+    role = await get_user_role(user_id)
+    if role != ModeratorRole.ADMIN:
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+    
+    await state.set_state(SubscriptionGrantStates.waiting_for_user_id)
+    await message.answer(
+        "💎 <b>Выдача подписки пользователю</b>\n\n"
+        "Введите Telegram ID пользователя, которому хотите выдать подписку:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_grant_subscription")]
+        ])
+    )
+
+@dp.message(SubscriptionGrantStates.waiting_for_user_id)
+async def handle_subscription_user_id_input(message: Message, state: FSMContext):
+    """Обработка ввода Telegram ID для выдачи подписки"""
+    try:
+        target_user_id = int(message.text.strip())
+        
+        # Проверяем, существует ли пользователь
+        user = await db.get_user(target_user_id)
+        if not user:
+            await message.answer(
+                f"❌ Пользователь с ID {target_user_id} не найден в базе данных.\n\n"
+                "Попробуйте еще раз или отмените операцию:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_grant_subscription")]
+                ])
+            )
+            return
+        
+        # Сохраняем ID пользователя в состоянии
+        await state.update_data(target_user_id=target_user_id)
+        await state.set_state(SubscriptionGrantStates.waiting_for_level_selection)
+        
+        # Показываем информацию о пользователе и выбор уровня подписки
+        user_info = (
+            f"👤 <b>Пользователь:</b> {user.name or 'Без имени'}\n"
+            f"🆔 <b>Telegram ID:</b> {target_user_id}\n"
+            f"🏙️ <b>Город:</b> {user.city or 'Не указан'}\n"
+            f"💎 <b>Текущая подписка:</b> {'Активна' if user.subscription_active else 'Не активна'}\n\n"
+        )
+        
+        if user.subscription_active and user.subscription_end:
+            end_date = datetime.datetime.fromtimestamp(user.subscription_end).strftime('%d.%m.%Y')
+            user_info += f"📅 <b>Истекает:</b> {end_date}\n\n"
+        
+        user_info += "Выберите уровень подписки для выдачи:"
+        
+        # Создаем клавиатуру с уровнями подписки
+        keyboard = []
+        for level in SUBSCRIPTION_LEVELS:
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{level['name']} - {level['description']} ({level['price']} ₽)",
+                    callback_data=f"grant_sub_level_{level['level'] - 1}"
+                )
+            ])
+        keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_grant_subscription")])
+        
+        await message.answer(
+            user_info,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+        
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат Telegram ID. Введите числовое значение:\n\n"
+            "Пример: 123456789",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_grant_subscription")]
+            ])
+        )
+
+@dp.callback_query(SubscriptionGrantStates.waiting_for_level_selection, lambda c: c.data.startswith("grant_sub_level_"))
+async def handle_subscription_level_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора уровня подписки для выдачи"""
+    await callback.answer()
+    
+    # Получаем индекс уровня из callback_data
+    level_index = int(callback.data.replace("grant_sub_level_", ""))
+    
+    if level_index < 0 or level_index >= len(SUBSCRIPTION_LEVELS):
+        await callback.answer("Неверный уровень", show_alert=True)
+        return
+    
+    level = SUBSCRIPTION_LEVELS[level_index]
+    data = await state.get_data()
+    target_user_id = data.get('target_user_id')
+    
+    if not target_user_id:
+        await callback.message.answer("❌ Ошибка: не найден ID пользователя. Начните заново.")
+        await state.clear()
+        return
+    
+    # Получаем информацию о пользователе
+    user = await db.get_user(target_user_id)
+    if not user:
+        await callback.message.answer("❌ Пользователь не найден.")
+        await state.clear()
+        return
+    
+    # Сохраняем выбранный уровень
+    await state.update_data(selected_level_index=level_index)
+    await state.set_state(SubscriptionGrantStates.confirming_subscription)
+    
+    # Вычисляем даты подписки
+    current_time = int(datetime.datetime.now().timestamp())
+    subscription_start = current_time
+    
+    # Если есть активная подписка, суммируем время
+    if user.subscription_active and user.subscription_end and user.subscription_end > current_time:
+        remaining_time = user.subscription_end - current_time
+        new_subscription_duration = level['months'] * 30 * 24 * 60 * 60  # в секундах
+        subscription_end = subscription_start + new_subscription_duration + remaining_time
+        action_text = "продлена"
+    else:
+        new_subscription_duration = level['months'] * 30 * 24 * 60 * 60  # в секундах
+        subscription_end = subscription_start + new_subscription_duration
+        action_text = "выдана"
+    
+    end_date = datetime.datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')
+    
+    # Сохраняем данные для подтверждения
+    await state.update_data(
+        subscription_start=subscription_start,
+        subscription_end=subscription_end,
+        months=level['months'],
+        level_name=level['name']
+    )
+    
+    # Показываем информацию для подтверждения
+    confirmation_text = (
+        f"💎 <b>Подтверждение выдачи подписки</b>\n\n"
+        f"👤 <b>Пользователь:</b> {user.name or 'Без имени'}\n"
+        f"🆔 <b>Telegram ID:</b> {target_user_id}\n\n"
+        f"📦 <b>Уровень подписки:</b> {level['name']}\n"
+        f"⏱ <b>Период:</b> {level['description']}\n"
+        f"💰 <b>Стоимость:</b> {level['price']} ₽\n\n"
+        f"📅 <b>Дата окончания:</b> {end_date}\n\n"
+        f"Подписка будет {action_text} пользователю."
+    )
+    
+    await callback.message.edit_text(
+        confirmation_text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_grant_subscription")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_grant_subscription")]
+        ])
+    )
+
+@dp.callback_query(lambda c: c.data == "confirm_grant_subscription")
+async def handle_confirm_grant_subscription(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение выдачи подписки"""
+    await callback.answer()
+    
+    data = await state.get_data()
+    target_user_id = data.get('target_user_id')
+    subscription_start = data.get('subscription_start')
+    subscription_end = data.get('subscription_end')
+    months = data.get('months')
+    level_name = data.get('level_name')
+    
+    if not all([target_user_id, subscription_start, subscription_end, months]):
+        await callback.message.answer("❌ Ошибка: неполные данные. Начните заново.")
+        await state.clear()
+        return
+    
+    try:
+        # Создаем запись о подписке
+        subscription = Subscription(
+            user_id=target_user_id,
+            payment_id=None,  # Нет платежа, так как выдано администратором
+            start_date=subscription_start,
+            end_date=subscription_end,
+            months=months,
+            status=SubscriptionStatus.ACTIVE,
+            auto_renew=False,
+            created_at=subscription_start,
+            updated_at=subscription_start
+        )
+        
+        subscription_id = await db.save_subscription(subscription)
+        
+        # Активируем подписку пользователя
+        await db.activate_user_subscription(target_user_id, subscription_start, subscription_end)
+        
+        # Получаем информацию о пользователе для уведомления
+        user = await db.get_user(target_user_id)
+        user_name = user.name if user else f"Пользователь {target_user_id}"
+        
+        end_date_str = datetime.datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')
+        
+        await callback.message.edit_text(
+            f"✅ <b>Подписка успешно выдана!</b>\n\n"
+            f"👤 <b>Пользователь:</b> {user_name}\n"
+            f"🆔 <b>Telegram ID:</b> {target_user_id}\n"
+            f"📦 <b>Уровень:</b> {level_name}\n"
+            f"⏱ <b>Период:</b> {months} месяцев\n"
+            f"📅 <b>Дата окончания:</b> {end_date_str}\n\n"
+            f"Подписка активирована.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_admin_menu")]
+            ])
+        )
+        
+        logger.info(f"Администратор {callback.from_user.id} выдал подписку уровня '{level_name}' пользователю {target_user_id}")
+        
+        # Уведомляем пользователя о выдаче подписки через основной бот
+        try:
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+            main_bot_token = os.getenv("BOT_TOKEN")
+            if main_bot_token:
+                from aiogram import Bot as UserBot
+                user_bot = UserBot(token=main_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+                await user_bot.send_message(
+                    target_user_id,
+                    f"🎉 <b>Вам выдана подписка!</b>\n\n"
+                    f"📦 <b>Уровень:</b> {level_name}\n"
+                    f"⏱ <b>Период:</b> {months} месяцев\n"
+                    f"📅 <b>Дата окончания:</b> {end_date_str}\n\n"
+                    f"🚀 Теперь вы можете пользоваться всеми функциями бота!",
+                    parse_mode="HTML"
+                )
+                await user_bot.session.close()
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление пользователю {target_user_id}: {e}")
+        
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче подписки: {e}")
+        await callback.message.answer(
+            f"❌ Ошибка при выдаче подписки: {e}\n\n"
+            "Попробуйте еще раз.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_admin_menu")]
+            ])
+        )
+        await state.clear()
+
+@dp.callback_query(lambda c: c.data == "cancel_grant_subscription")
+async def handle_cancel_grant_subscription(callback: CallbackQuery, state: FSMContext):
+    """Отмена выдачи подписки"""
+    await callback.answer()
+    await callback.message.edit_text("❌ Выдача подписки отменена.")
+    await state.clear()
+    # Возвращаемся в главное меню админа
+    await callback.message.answer(
+        "💎 Выдача подписки отменена.\n\n"
+        "Используйте меню для продолжения работы.",
+        reply_markup=create_admin_keyboard()
+    )
 
 async def main():
     """Главная функция запуска бота"""
