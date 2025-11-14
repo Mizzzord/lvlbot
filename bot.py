@@ -310,7 +310,23 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
                     # Парсим JSON из ответа
                     try:
                         import json
-                        stats = json.loads(result_text)
+                        import re
+                        
+                        # Улучшенный парсинг JSON - извлекаем JSON даже если есть markdown или другие символы
+                        result_text_clean = result_text.strip()
+                        
+                        # Удаляем markdown код блоки если есть
+                        if result_text_clean.startswith('```'):
+                            result_text_clean = re.sub(r'^```(?:json)?\s*', '', result_text_clean)
+                            result_text_clean = re.sub(r'\s*```$', '', result_text_clean)
+                        
+                        # Ищем JSON объект в тексте (может быть окружен текстом)
+                        json_match = re.search(r'\{[^{}]*"strength"[^{}]*"agility"[^{}]*"endurance"[^{}]*\}', result_text_clean, re.DOTALL)
+                        if json_match:
+                            result_text_clean = json_match.group(0)
+                        
+                        # Парсим JSON
+                        stats = json.loads(result_text_clean)
                         logger.info(f"ИИ вернул характеристики: {stats}")
 
                         # Валидируем и нормализуем значения
@@ -324,10 +340,37 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
                             'endurance': endurance
                         }
                         logger.info(f"Нормализованные характеристики: {result_stats}")
+                        
+                        # Проверяем, что значения не стандартные (50/100)
+                        if strength == 50 and agility == 50 and endurance == 50:
+                            logger.warning(f"Получены стандартные значения 50/50/50. Возможно, парсинг не сработал. Исходный ответ: {result_text}")
+                        
                         return result_stats
                     except (json.JSONDecodeError, KeyError, ValueError) as e:
                         logger.error(f"Ошибка парсинга ответа ИИ: {e}, ответ: {result_text}")
-                        # Возвращаем значения по умолчанию
+                        # Пытаемся извлечь числа из текста вручную
+                        try:
+                            strength_match = re.search(r'"strength"\s*:\s*(\d+)', result_text, re.IGNORECASE)
+                            agility_match = re.search(r'"agility"\s*:\s*(\d+)', result_text, re.IGNORECASE)
+                            endurance_match = re.search(r'"endurance"\s*:\s*(\d+)', result_text, re.IGNORECASE)
+                            
+                            if strength_match and agility_match and endurance_match:
+                                strength = max(1, min(100, int(strength_match.group(1))))
+                                agility = max(1, min(100, int(agility_match.group(1))))
+                                endurance = max(1, min(100, int(endurance_match.group(1))))
+                                
+                                result_stats = {
+                                    'strength': strength,
+                                    'agility': agility,
+                                    'endurance': endurance
+                                }
+                                logger.info(f"Извлечены характеристики через regex: {result_stats}")
+                                return result_stats
+                        except Exception as regex_error:
+                            logger.error(f"Ошибка при извлечении через regex: {regex_error}")
+                        
+                        # Возвращаем значения по умолчанию только в крайнем случае
+                        logger.warning(f"Используются значения по умолчанию. Исходный ответ ИИ: {result_text}")
                         return {'strength': 50, 'agility': 50, 'endurance': 50}
                 else:
                     logger.error(f"Polza.ai API error: {response.status}")

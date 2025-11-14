@@ -7,9 +7,58 @@ from datetime import date
 from typing import Optional
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
 from rank_config import get_rank_by_experience
-from postgres_config import get_postgres_connection_string, validate_postgres_config
+from postgres_config import get_postgres_connection_string, get_postgres_connection_params, validate_postgres_config
 
 logger = logging.getLogger(__name__)
+
+async def _get_postgres_connection():
+    """Вспомогательная функция для получения подключения к PostgreSQL"""
+    """Использует параметры подключения напрямую (рекомендуемый способ для asyncpg)"""
+    from postgres_config import POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DATABASE, POSTGRES_USER
+    
+    try:
+        # Для asyncpg лучше использовать параметры напрямую, а не строку подключения
+        # Это позволяет правильно обработать SSL параметры
+        conn_params = get_postgres_connection_params()
+        
+        logger.info(f"Попытка подключения к PostgreSQL: {POSTGRES_USER}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DATABASE}")
+        
+        return await asyncpg.connect(**conn_params)
+    except ValueError as e:
+        # Ошибка валидации (например, пустой пароль)
+        logger.error(f"❌ Ошибка конфигурации PostgreSQL: {e}")
+        raise
+    except asyncpg.exceptions.InvalidPasswordError as e:
+        logger.error(f"❌ Ошибка аутентификации PostgreSQL: неправильный пароль для пользователя '{POSTGRES_USER}'")
+        logger.error("Возможные причины:")
+        logger.error("  1. Неправильный пароль в переменной окружения POSTGRES_PASSWORD")
+        logger.error("  2. Пароль содержит специальные символы, которые нужно экранировать")
+        logger.error("  3. Пароль был изменен на сервере, но не обновлен в .env файле")
+        logger.error("Решение:")
+        logger.error("  - Проверьте правильность пароля в .env файле")
+        logger.error("  - Убедитесь что пароль не содержит лишних пробелов или кавычек")
+        logger.error("  - Попробуйте сбросить пароль в панели управления Timeweb")
+        raise Exception(f"Ошибка аутентификации PostgreSQL: неправильный пароль для пользователя '{POSTGRES_USER}'. Проверьте POSTGRES_PASSWORD в .env файле.")
+    except asyncpg.exceptions.InvalidCatalogNameError as e:
+        logger.error(f"❌ Ошибка подключения PostgreSQL: база данных '{POSTGRES_DATABASE}' не найдена")
+        logger.error("Проверьте правильность имени базы данных в переменной окружения POSTGRES_DATABASE")
+        raise Exception(f"База данных '{POSTGRES_DATABASE}' не найдена. Проверьте POSTGRES_DATABASE в .env файле.")
+    except asyncpg.exceptions.PostgresConnectionError as e:
+        logger.error(f"❌ Ошибка подключения к серверу PostgreSQL: {e}")
+        logger.error(f"Проверьте настройки подключения:")
+        logger.error(f"  - POSTGRES_HOST: {POSTGRES_HOST}")
+        logger.error(f"  - POSTGRES_PORT: {POSTGRES_PORT}")
+        logger.error(f"  - Убедитесь что сервер доступен и порт открыт")
+        raise Exception(f"Не удалось подключиться к серверу PostgreSQL на {POSTGRES_HOST}:{POSTGRES_PORT}. Проверьте доступность сервера.")
+    except Exception as e:
+        logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
+        logger.error(f"Проверьте настройки подключения:")
+        logger.error(f"  - POSTGRES_HOST: {POSTGRES_HOST}")
+        logger.error(f"  - POSTGRES_PORT: {POSTGRES_PORT}")
+        logger.error(f"  - POSTGRES_DATABASE: {POSTGRES_DATABASE}")
+        logger.error(f"  - POSTGRES_USER: {POSTGRES_USER}")
+        logger.error(f"  - POSTGRES_SSL_MODE: {os.getenv('POSTGRES_SSL_MODE', 'не указан')}")
+        raise Exception(f"Не удалось подключиться к PostgreSQL: {e}")
 
 class Database:
     def __init__(self, db_path: str = "bot_database.db", use_postgres: bool = False):
@@ -265,8 +314,17 @@ class Database:
 
     async def _init_postgres_db(self):
         """Инициализация PostgreSQL базы данных"""
-        conn_string = get_postgres_connection_string()
-        conn = await asyncpg.connect(conn_string)
+        # Подключаемся к базе данных
+        conn = await _get_postgres_connection()
+        
+        # Проверяем подключение
+        try:
+            version = await conn.fetchval('SELECT version()')
+            logger.info(f"✅ Подключение к PostgreSQL успешно. Версия: {version.split(',')[0]}")
+        except Exception as e:
+            await conn.close()
+            logger.error(f"❌ Ошибка проверки подключения к PostgreSQL: {e}")
+            raise Exception(f"Не удалось проверить подключение к PostgreSQL: {e}")
 
         try:
             # Создаем таблицу пользователей
@@ -364,6 +422,7 @@ class Database:
                     level INTEGER DEFAULT 1,
                     experience INTEGER DEFAULT 0,
                     rank TEXT DEFAULT 'F',
+                    referral_rank TEXT,
                     current_streak INTEGER DEFAULT 0,
                     best_streak INTEGER DEFAULT 0,
                     total_tasks_completed INTEGER DEFAULT 0,
@@ -373,6 +432,12 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
                 )
             ''')
+            
+            # Добавляем недостающие колонки, если они отсутствуют
+            try:
+                await conn.execute('ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS referral_rank TEXT')
+            except Exception:
+                pass
 
             # Создаем таблицу ежедневных заданий
             await conn.execute('''
@@ -405,7 +470,9 @@ class Database:
             # Инициализируем стандартные призы
             await self._init_default_prizes_postgres(conn)
 
-            logger.info("PostgreSQL база данных инициализирована")
+            # Финальная проверка подключения
+            test_query = await conn.fetchval('SELECT COUNT(*) FROM users')
+            logger.info(f"✅ PostgreSQL база данных инициализирована успешно. Пользователей в базе: {test_query}")
 
         finally:
             await conn.close()
@@ -430,8 +497,7 @@ class Database:
         if not self.use_postgres:
             raise Exception("Этот метод доступен только для PostgreSQL")
 
-        conn_string = get_postgres_connection_string()
-        conn = await asyncpg.connect(conn_string)
+        conn = await _get_postgres_connection()
 
         try:
             if query.strip().upper().startswith('SELECT'):
@@ -1234,8 +1300,7 @@ class Database:
         logger.info(f"Сохранение PlayerStats для user_id={stats.user_id}: strength={stats.strength}, agility={stats.agility}, endurance={stats.endurance}, intelligence={stats.intelligence}, charisma={stats.charisma}")
         
         if self.use_postgres:
-            conn_string = get_postgres_connection_string()
-            conn = await asyncpg.connect(conn_string)
+            conn = await _get_postgres_connection()
             try:
                 row = await conn.fetchrow('''
                     INSERT INTO player_stats (user_id, nickname, experience, strength, agility, endurance, intelligence, charisma, photo_path, card_image_path, created_at, updated_at)
@@ -1309,8 +1374,7 @@ class Database:
     async def get_player_stats(self, user_id: int) -> Optional[PlayerStats]:
         """Получение статов игрока"""
         if self.use_postgres:
-            conn_string = get_postgres_connection_string()
-            conn = await asyncpg.connect(conn_string)
+            conn = await _get_postgres_connection()
             try:
                 row = await conn.fetchrow('''
                     SELECT * FROM player_stats WHERE user_id = $1
@@ -1403,8 +1467,7 @@ class Database:
     async def get_active_daily_task(self, user_id: int) -> Optional[DailyTask]:
         """Получение активного ежедневного задания пользователя (ожидающего выполнения или на проверке)"""
         if self.use_postgres:
-            conn_string = get_postgres_connection_string()
-            conn = await asyncpg.connect(conn_string)
+            conn = await _get_postgres_connection()
             try:
                 row = await conn.fetchrow('''
                     SELECT * FROM daily_tasks
@@ -1531,55 +1594,109 @@ class Database:
 
     async def save_user_stats(self, stats: UserStats):
         """Сохранение или обновление статистики пользователя"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                INSERT INTO user_stats (user_id, level, experience, rank, referral_rank, current_streak, best_streak, total_tasks_completed, last_task_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    level = excluded.level,
-                    experience = excluded.experience,
-                    rank = excluded.rank,
-                    referral_rank = excluded.referral_rank,
-                    current_streak = excluded.current_streak,
-                    best_streak = excluded.best_streak,
-                    total_tasks_completed = excluded.total_tasks_completed,
-                    last_task_date = excluded.last_task_date
-            ''', (
-                stats.user_id,
-                stats.level,
-                stats.experience,
-                stats.rank.value,
-                stats.referral_rank.value if stats.referral_rank else None,
-                stats.current_streak,
-                stats.best_streak,
-                stats.total_tasks_completed,
-                stats.last_task_date
-            ))
-            await db.commit()
-            logger.info(f"Статистика пользователя {stats.user_id} сохранена")
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                await conn.execute('''
+                    INSERT INTO user_stats (user_id, level, experience, rank, referral_rank, current_streak, best_streak, total_tasks_completed, last_task_date)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        level = EXCLUDED.level,
+                        experience = EXCLUDED.experience,
+                        rank = EXCLUDED.rank,
+                        referral_rank = EXCLUDED.referral_rank,
+                        current_streak = EXCLUDED.current_streak,
+                        best_streak = EXCLUDED.best_streak,
+                        total_tasks_completed = EXCLUDED.total_tasks_completed,
+                        last_task_date = EXCLUDED.last_task_date,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (
+                    stats.user_id,
+                    stats.level,
+                    stats.experience,
+                    stats.rank.value,
+                    stats.referral_rank.value if stats.referral_rank else None,
+                    stats.current_streak,
+                    stats.best_streak,
+                    stats.total_tasks_completed,
+                    stats.last_task_date
+                ))
+                logger.info(f"Статистика пользователя {stats.user_id} сохранена в PostgreSQL")
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO user_stats (user_id, level, experience, rank, referral_rank, current_streak, best_streak, total_tasks_completed, last_task_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        level = excluded.level,
+                        experience = excluded.experience,
+                        rank = excluded.rank,
+                        referral_rank = excluded.referral_rank,
+                        current_streak = excluded.current_streak,
+                        best_streak = excluded.best_streak,
+                        total_tasks_completed = excluded.total_tasks_completed,
+                        last_task_date = excluded.last_task_date
+                ''', (
+                    stats.user_id,
+                    stats.level,
+                    stats.experience,
+                    stats.rank.value,
+                    stats.referral_rank.value if stats.referral_rank else None,
+                    stats.current_streak,
+                    stats.best_streak,
+                    stats.total_tasks_completed,
+                    stats.last_task_date
+                ))
+                await db.commit()
+                logger.info(f"Статистика пользователя {stats.user_id} сохранена в SQLite")
 
     async def get_user_stats(self, user_id: int) -> Optional[UserStats]:
         """Получение статистики пользователя"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT * FROM user_stats WHERE user_id = ?
-            ''', (user_id,))
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                row = await conn.fetchrow('''
+                    SELECT * FROM user_stats WHERE user_id = $1
+                ''', user_id)
+                
+                if row:
+                    return UserStats(
+                        user_id=row['user_id'],
+                        level=row['level'],
+                        experience=row['experience'],
+                        rank=Rank(row['rank']),
+                        referral_rank=Rank(row['referral_rank']) if row['referral_rank'] else None,
+                        current_streak=row['current_streak'],
+                        best_streak=row['best_streak'],
+                        total_tasks_completed=row['total_tasks_completed'],
+                        last_task_date=row['last_task_date']
+                    )
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM user_stats WHERE user_id = ?
+                ''', (user_id,))
 
-            row = await cursor.fetchone()
-            if row:
-                return UserStats(
-                    user_id=row['user_id'],
-                    level=row['level'],
-                    experience=row['experience'],
-                    rank=Rank(row['rank']),
-                    referral_rank=Rank(row['referral_rank']) if row['referral_rank'] else None,
-                    current_streak=row['current_streak'],
-                    best_streak=row['best_streak'],
-                    total_tasks_completed=row['total_tasks_completed'],
-                    last_task_date=row['last_task_date']
-                )
-            return None
+                row = await cursor.fetchone()
+                if row:
+                    return UserStats(
+                        user_id=row['user_id'],
+                        level=row['level'],
+                        experience=row['experience'],
+                        rank=Rank(row['rank']),
+                        referral_rank=Rank(row['referral_rank']) if row['referral_rank'] else None,
+                        current_streak=row['current_streak'],
+                        best_streak=row['best_streak'],
+                        total_tasks_completed=row['total_tasks_completed'],
+                        last_task_date=row['last_task_date']
+                    )
+                return None
 
     async def get_top_users_by_city(self, city: str, limit: int = 10) -> list[tuple]:
         """Получение топ пользователей по городу (по уровню)"""
