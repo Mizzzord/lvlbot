@@ -110,6 +110,7 @@ class PrizeManagementStates(StatesGroup):
     waiting_for_achievement_type = State()
     waiting_for_achievement_value = State()
     waiting_for_custom_condition = State()  # Новое состояние для произвольных условий
+    waiting_for_subscription_level = State()  # Выбор уровня подписки
     waiting_for_prize_emoji = State()
     confirming_prize = State()
     waiting_for_prize_id_to_delete = State()
@@ -1898,14 +1899,16 @@ async def handle_custom_condition(message: Message, state: FSMContext):
     
     text = "🎁 <b>Создание приза</b>\n\n"
     text += f"Условие: {custom_condition}\n\n"
-    text += "Введите эмодзи для приза (или нажмите '🎁 По умолчанию'):"
+    text += "Выберите уровень подписки для приза:"
     
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 По умолчанию", callback_data="default_emoji")],
+        [InlineKeyboardButton(text="🌐 Для всех уровней", callback_data="sub_level_all")],
+        [InlineKeyboardButton(text="⭐ Для уровня 2 (Продвинутый)", callback_data="sub_level_2")],
+        [InlineKeyboardButton(text="💎 Для уровня 3 (Мастер)", callback_data="sub_level_3")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_prize_creation")]
     ]))
     
-    await state.set_state(PrizeManagementStates.waiting_for_prize_emoji)
+    await state.set_state(PrizeManagementStates.waiting_for_subscription_level)
 
 @dp.message(PrizeManagementStates.waiting_for_achievement_value)
 async def handle_achievement_value(message: Message, state: FSMContext):
@@ -1923,14 +1926,16 @@ async def handle_achievement_value(message: Message, state: FSMContext):
 
     text = "🎁 <b>Создание приза</b>\n\n"
     text += f"Значение: {value}\n\n"
-    text += "Введите эмодзи для приза (или нажмите '🎁 По умолчанию'):"
+    text += "Выберите уровень подписки для приза:"
 
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 По умолчанию", callback_data="default_emoji")],
+        [InlineKeyboardButton(text="🌐 Для всех уровней", callback_data="sub_level_all")],
+        [InlineKeyboardButton(text="⭐ Для уровня 2 (Продвинутый)", callback_data="sub_level_2")],
+        [InlineKeyboardButton(text="💎 Для уровня 3 (Мастер)", callback_data="sub_level_3")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_prize_creation")]
     ]))
 
-    await state.set_state(PrizeManagementStates.waiting_for_prize_emoji)
+    await state.set_state(PrizeManagementStates.waiting_for_subscription_level)
 
 @dp.message(PrizeManagementStates.waiting_for_prize_emoji)
 async def handle_prize_emoji(message: Message, state: FSMContext):
@@ -1942,6 +1947,36 @@ async def handle_prize_emoji(message: Message, state: FSMContext):
 
     await state.update_data(prize_emoji=emoji)
     await confirm_prize_creation(message, state)
+
+@dp.callback_query(lambda c: c.data.startswith("sub_level_"))
+async def handle_subscription_level_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора уровня подписки для приза"""
+    await callback.answer()
+    
+    level_data = callback.data.replace("sub_level_", "")
+    subscription_level = None
+    if level_data == "2":
+        subscription_level = 2
+    elif level_data == "3":
+        subscription_level = 3
+    
+    await state.update_data(prize_subscription_level=subscription_level)
+    
+    text = "🎁 <b>Создание приза</b>\n\n"
+    level_text = "Для всех уровней"
+    if subscription_level == 2:
+        level_text = "Для уровня 2 (Продвинутый)"
+    elif subscription_level == 3:
+        level_text = "Для уровня 3 (Мастер)"
+    text += f"Уровень подписки: {level_text}\n\n"
+    text += "Введите эмодзи для приза (или нажмите '🎁 По умолчанию'):"
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 По умолчанию", callback_data="default_emoji")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_prize_creation")]
+    ]))
+    
+    await state.set_state(PrizeManagementStates.waiting_for_prize_emoji)
 
 @dp.callback_query(lambda c: c.data == "default_emoji")
 async def handle_default_emoji(callback: CallbackQuery, state: FSMContext):
@@ -1961,12 +1996,20 @@ async def confirm_prize_creation(message, state: FSMContext):
         data.get('custom_condition')
     )
 
+    subscription_level = data.get('prize_subscription_level')
+    level_text = "Для всех уровней"
+    if subscription_level == 2:
+        level_text = "Для уровня 2 (Продвинутый)"
+    elif subscription_level == 3:
+        level_text = "Для уровня 3 (Мастер)"
+
     text = "🎁 <b>Подтверждение создания приза</b>\n\n"
     text += f"🏷️ <b>Название:</b> {data['prize_title']}\n"
     text += f"📝 <b>Описание:</b> {data.get('prize_description', 'Без описания')}\n"
     text += f"🎯 <b>Условие:</b> {achievement_desc}\n"
     text += f"😊 <b>Эмодзи:</b> {data.get('prize_emoji', '🎁')}\n"
-    text += f"👑 <b>Тип:</b> {'Главный модератор' if data['prize_type'] == 'admin' else 'Блогер'}\n\n"
+    text += f"👑 <b>Тип:</b> {'Главный модератор' if data['prize_type'] == 'admin' else 'Блогер'}\n"
+    text += f"⭐ <b>Уровень подписки:</b> {level_text}\n\n"
     text += "Создать этот приз?"
 
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -2019,6 +2062,7 @@ async def handle_confirm_create_prize(callback: CallbackQuery, state: FSMContext
         achievement_type=data['achievement_type'],
         achievement_value=data.get('achievement_value', 0),
         custom_condition=data.get('custom_condition'),  # Произвольное условие
+        subscription_level=data.get('prize_subscription_level'),  # Уровень подписки (None, 2 или 3)
         emoji=data.get('prize_emoji', '🎁'),
         is_active=True,
         created_at=int(datetime.datetime.now().timestamp()),

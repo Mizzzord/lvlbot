@@ -19,8 +19,8 @@ class Database:
         if self.use_postgres:
             # Проверяем конфигурацию PostgreSQL только если используется PostgreSQL
             try:
-                validate_postgres_config()
-                logger.info("Используется PostgreSQL база данных")
+            validate_postgres_config()
+            logger.info("Используется PostgreSQL база данных")
             except Exception as e:
                 logger.error(f"Ошибка конфигурации PostgreSQL: {e}")
                 raise
@@ -108,6 +108,17 @@ class Database:
                     logger.info("Добавлена колонка subscription_level в таблицу subscriptions")
             except Exception as e:
                 logger.warning(f"Не удалось добавить колонку subscription_level: {e}")
+            
+            # Добавляем колонку subscription_level в таблицу payments если её нет (миграция для существующих БД)
+            try:
+                cursor = await db.execute("PRAGMA table_info(payments)")
+                columns = [row[1] for row in await cursor.fetchall()]
+                if 'subscription_level' not in columns:
+                    await db.execute('ALTER TABLE payments ADD COLUMN subscription_level INTEGER DEFAULT 1')
+                    await db.commit()
+                    logger.info("Добавлена колонка subscription_level в таблицу payments")
+            except Exception as e:
+                logger.warning(f"Не удалось добавить колонку subscription_level в payments: {e}")
 
             # Создаем таблицу статов игрока
             await db.execute('''
@@ -171,6 +182,7 @@ class Database:
                     achievement_type TEXT NOT NULL,
                     achievement_value INTEGER NOT NULL,
                     custom_condition TEXT,
+                    subscription_level INTEGER,
                     emoji TEXT DEFAULT '🎁',
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at INTEGER NOT NULL,
@@ -570,7 +582,8 @@ class Database:
             ('payment_method', "TEXT DEFAULT 'WATA'"),
             ('discount_code', 'TEXT'),
             ('referral_used', 'TEXT'),
-            ('subscription_type', "TEXT DEFAULT 'standard'")
+            ('subscription_type', "TEXT DEFAULT 'standard'"),
+            ('subscription_level', 'INTEGER DEFAULT 1')
         ]
 
         for column_name, column_type in payment_columns:
@@ -622,6 +635,19 @@ class Database:
             try:
                 await db.execute(f'ALTER TABLE user_stats ADD COLUMN {column_name} {column_type}')
                 logger.info(f"Колонка {column_name} добавлена в таблицу user_stats")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+        # Поля для таблицы prizes
+        prizes_columns = [
+            ('subscription_level', 'INTEGER')
+        ]
+
+        for column_name, column_type in prizes_columns:
+            try:
+                await db.execute(f'ALTER TABLE prizes ADD COLUMN {column_name} {column_type}')
+                logger.info(f"Колонка {column_name} добавлена в таблицу prizes")
             except aiosqlite.OperationalError:
                 # Колонка уже существует
                 pass
@@ -879,6 +905,33 @@ class Database:
     async def save_payment(self, payment: Payment) -> int:
         """Сохранение платежа в базу данных"""
         async with aiosqlite.connect(self.db_path) as db:
+            # Проверяем наличие колонки subscription_level
+            cursor = await db.execute("PRAGMA table_info(payments)")
+            columns = [row[1] for row in await cursor.fetchall()]
+            has_subscription_level = 'subscription_level' in columns
+            
+            if has_subscription_level:
+                cursor = await db.execute('''
+                    INSERT INTO payments (user_id, payment_id, order_id, amount, months, status, created_at, paid_at,
+                                         currency, payment_method, discount_code, referral_used, subscription_type, subscription_level)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    payment.user_id,
+                    payment.payment_id,
+                    payment.order_id,
+                    payment.amount,
+                    payment.months,
+                    payment.status.value,
+                    payment.created_at,
+                    payment.paid_at,
+                    payment.currency,
+                    payment.payment_method,
+                    payment.discount_code,
+                    payment.referral_used,
+                    payment.subscription_type,
+                    payment.subscription_level
+                ))
+            else:
             cursor = await db.execute('''
                 INSERT INTO payments (user_id, payment_id, order_id, amount, months, status, created_at, paid_at,
                                      currency, payment_method, discount_code, referral_used, subscription_type)
@@ -914,6 +967,13 @@ class Database:
             row = await cursor.fetchone()
 
         if row:
+            # Проверяем наличие subscription_level в результате
+            subscription_level = 1  # По умолчанию
+            try:
+                subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+            except (KeyError, IndexError):
+                subscription_level = 1
+            
             return Payment(
                     id=row['id'],
                     user_id=row['user_id'],
@@ -926,6 +986,7 @@ class Database:
                     paid_at=row['paid_at'],
                     currency=row['currency'],
                     payment_method=row['payment_method'],
+                    subscription_level=subscription_level,
                     discount_code=row['discount_code'],
                     referral_used=row['referral_used'],
                     subscription_type=row['subscription_type']
@@ -943,6 +1004,13 @@ class Database:
 
             payments = []
             for row in rows:
+                # Проверяем наличие subscription_level в результате
+                subscription_level = 1  # По умолчанию
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                except (KeyError, IndexError):
+                    subscription_level = 1
+                
                 payments.append(Payment(
                     id=row['id'],
                     user_id=row['user_id'],
@@ -957,7 +1025,8 @@ class Database:
                     payment_method=row['payment_method'],
                     discount_code=row['discount_code'],
                     referral_used=row['referral_used'],
-                    subscription_type=row['subscription_type']
+                    subscription_type=row['subscription_type'],
+                    subscription_level=subscription_level
                 ))
             return payments
 
@@ -1001,21 +1070,21 @@ class Database:
                 ))
             else:
                 # Fallback для старых версий БД
-                cursor = await db.execute('''
-                    INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
-                                              auto_renew, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    subscription.user_id,
-                    subscription.payment_id,
-                    subscription.start_date,
-                    subscription.end_date,
-                    subscription.months,
-                    subscription.status.value,
-                    subscription.auto_renew,
-                    subscription.created_at,
-                    subscription.updated_at
-                ))
+            cursor = await db.execute('''
+                INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
+                                          auto_renew, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                subscription.user_id,
+                subscription.payment_id,
+                subscription.start_date,
+                subscription.end_date,
+                subscription.months,
+                subscription.status.value,
+                subscription.auto_renew,
+                subscription.created_at,
+                subscription.updated_at
+            ))
             subscription_id = cursor.lastrowid
             await db.commit()
             logger.info(f"Подписка {subscription_id} для пользователя {subscription.user_id} сохранена")
@@ -1428,6 +1497,25 @@ class Database:
             rows = await cursor.fetchall()
             return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
 
+    async def get_top_users_by_subscription_level(self, subscription_level: int, limit: int = 10) -> list[tuple]:
+        """Получение топ пользователей по уровню подписки"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT u.name, us.level, us.experience, us.rank, u.city
+                FROM users u
+                JOIN user_stats us ON u.telegram_id = us.user_id
+                JOIN subscriptions s ON u.telegram_id = s.user_id
+                WHERE s.subscription_level = ? 
+                AND s.status = 'active'
+                AND s.end_date > ?
+                AND u.subscription_active = TRUE
+                ORDER BY us.level DESC, us.experience DESC
+                LIMIT ?
+            ''', (subscription_level, int(datetime.datetime.now().timestamp()), limit))
+
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
+
     async def update_user_referral_rank(self, user_id: int):
         """Обновление рейтинга среди подписчиков блогера для пользователя"""
         # Получаем текущую статистику пользователя
@@ -1632,34 +1720,39 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             if prize.id is None:
                 # Создание нового приза
-                # Проверяем наличие колонки custom_condition
+                # Проверяем наличие колонок
                 cursor = await db.execute("PRAGMA table_info(prizes)")
                 columns = [row[1] for row in await cursor.fetchall()]
                 has_custom_condition = 'custom_condition' in columns
+                has_subscription_level = 'subscription_level' in columns
                 
-                if has_custom_condition:
-                    cursor = await db.execute('''
-                        INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, custom_condition, emoji, is_active, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        prize.prize_type.value,
-                        prize.referral_code,
-                        prize.title,
-                        prize.description,
-                        prize.achievement_type,
-                        prize.achievement_value,
+                if has_custom_condition and has_subscription_level:
+                cursor = await db.execute('''
+                        INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, custom_condition, subscription_level, emoji, is_active, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    prize.prize_type.value,
+                    prize.referral_code,
+                    prize.title,
+                    prize.description,
+                    prize.achievement_type,
+                    prize.achievement_value,
                         prize.custom_condition,
+                        prize.subscription_level,
                         prize.emoji,
                         prize.is_active,
                         prize.created_at,
                         prize.updated_at
                     ))
                 else:
-                    # Добавляем колонку если её нет
-                    await db.execute('ALTER TABLE prizes ADD COLUMN custom_condition TEXT')
+                    # Добавляем колонки если их нет
+                    if not has_custom_condition:
+                        await db.execute('ALTER TABLE prizes ADD COLUMN custom_condition TEXT')
+                    if not has_subscription_level:
+                        await db.execute('ALTER TABLE prizes ADD COLUMN subscription_level INTEGER')
                     cursor = await db.execute('''
-                        INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, custom_condition, emoji, is_active, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, custom_condition, subscription_level, emoji, is_active, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         prize.prize_type.value,
                         prize.referral_code,
@@ -1668,21 +1761,25 @@ class Database:
                         prize.achievement_type,
                         prize.achievement_value,
                         prize.custom_condition,
-                        prize.emoji,
-                        prize.is_active,
-                        prize.created_at,
-                        prize.updated_at
-                    ))
+                        prize.subscription_level,
+                    prize.emoji,
+                    prize.is_active,
+                    prize.created_at,
+                    prize.updated_at
+                ))
                 prize.id = cursor.lastrowid
             else:
                 # Обновление существующего приза
-                # Проверяем наличие колонки custom_condition
+                # Проверяем наличие колонок
                 cursor = await db.execute("PRAGMA table_info(prizes)")
                 columns = [row[1] for row in await cursor.fetchall()]
                 has_custom_condition = 'custom_condition' in columns
+                has_subscription_level = 'subscription_level' in columns
                 
                 if not has_custom_condition:
                     await db.execute('ALTER TABLE prizes ADD COLUMN custom_condition TEXT')
+                if not has_subscription_level:
+                    await db.execute('ALTER TABLE prizes ADD COLUMN subscription_level INTEGER')
                 
                 await db.execute('''
                     UPDATE prizes SET
@@ -1693,6 +1790,7 @@ class Database:
                         achievement_type = ?,
                         achievement_value = ?,
                         custom_condition = ?,
+                        subscription_level = ?,
                         emoji = ?,
                         is_active = ?,
                         updated_at = ?
@@ -1705,6 +1803,7 @@ class Database:
                     prize.achievement_type,
                     prize.achievement_value,
                     prize.custom_condition,
+                    prize.subscription_level,
                     prize.emoji,
                     prize.is_active,
                     prize.updated_at,
@@ -1714,8 +1813,15 @@ class Database:
             logger.info(f"Приз '{prize.title}' сохранен (ID: {prize.id})")
             return prize.id
 
-    async def get_prizes(self, prize_type: Optional[PrizeType] = None, referral_code: Optional[str] = None, is_active: bool = True) -> list[Prize]:
-        """Получение списка призов"""
+    async def get_prizes(self, prize_type: Optional[PrizeType] = None, referral_code: Optional[str] = None, is_active: bool = True, subscription_level: Optional[int] = None) -> list[Prize]:
+        """Получение списка призов
+        
+        Args:
+            prize_type: Тип приза (ADMIN или BLOGGER)
+            referral_code: Реферальный код блогера
+            is_active: Активен ли приз
+            subscription_level: Уровень подписки (None - для всех, 2 - для уровня 2, 3 - для уровня 3)
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
 
@@ -1733,6 +1839,12 @@ class Database:
             if is_active is not None:
                 conditions.append("is_active = ?")
                 params.append(is_active)
+
+            if subscription_level is not None:
+                # Призы для конкретного уровня подписки или для всех (subscription_level IS NULL)
+                conditions.append("(subscription_level = ? OR subscription_level IS NULL)")
+                params.append(subscription_level)
+            # Если subscription_level не указан, не добавляем фильтр - показываем все призы
 
             where_clause = " AND ".join(conditions) if conditions else "1=1"
 
@@ -1754,6 +1866,13 @@ class Database:
                     # Колонка отсутствует в старых версиях БД
                     custom_condition = None
                 
+                # Проверяем наличие колонки subscription_level
+                subscription_level = None
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else None
+                except (KeyError, IndexError):
+                    subscription_level = None
+                
                 prizes.append(Prize(
                     id=row['id'],
                     prize_type=PrizeType(row['prize_type']),
@@ -1763,6 +1882,7 @@ class Database:
                     achievement_type=row['achievement_type'],
                     achievement_value=row['achievement_value'],
                     custom_condition=custom_condition,
+                    subscription_level=subscription_level,
                     emoji=row['emoji'],
                     is_active=row['is_active'],
                     created_at=row['created_at'],
@@ -1788,6 +1908,13 @@ class Database:
                     # Колонка отсутствует в старых версиях БД
                     custom_condition = None
                 
+                # Проверяем наличие колонки subscription_level
+                subscription_level = None
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else None
+                except (KeyError, IndexError):
+                    subscription_level = None
+                
                 return Prize(
                     id=row['id'],
                     prize_type=PrizeType(row['prize_type']),
@@ -1797,6 +1924,7 @@ class Database:
                     achievement_type=row['achievement_type'],
                     achievement_value=row['achievement_value'],
                     custom_condition=custom_condition,
+                    subscription_level=subscription_level,
                     emoji=row['emoji'],
                     is_active=row['is_active'],
                     created_at=row['created_at'],

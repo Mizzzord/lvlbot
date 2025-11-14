@@ -64,6 +64,7 @@ class Payment:
     discount_code: Optional[str] = None
     referral_used: Optional[str] = None
     subscription_type: str = "standard"  # standard, premium, etc.
+    subscription_level: int = 1  # уровень подписки (1, 2 или 3)
 
 @dataclass
 class Subscription:
@@ -146,6 +147,7 @@ class Prize:
     achievement_type: str = ""  # тип достижения (streak, rank, level, tasks, experience, custom)
     achievement_value: int = 0  # значение достижения (число для стандартных типов)
     custom_condition: Optional[str] = None  # произвольное текстовое описание условия (для типа "custom")
+    subscription_level: Optional[int] = None  # уровень подписки (None - для всех, 2 - для уровня 2, 3 - для уровня 3)
     emoji: str = "🎁"  # эмодзи приза
     is_active: bool = True  # активен ли приз
     created_at: int = 0  # timestamp создания

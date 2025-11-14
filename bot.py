@@ -1649,6 +1649,13 @@ async def check_payment_callback(callback: CallbackQuery, state: FSMContext):
 
     payment = None
     if row:
+        # Проверяем наличие subscription_level в результате
+        subscription_level = 1  # По умолчанию
+        try:
+            subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+        except (KeyError, IndexError):
+            subscription_level = 1
+        
         payment = Payment(
             id=row['id'],
             user_id=row['user_id'],
@@ -1663,7 +1670,8 @@ async def check_payment_callback(callback: CallbackQuery, state: FSMContext):
             payment_method=row['payment_method'],
             discount_code=row['discount_code'],
             referral_used=row['referral_used'],
-            subscription_type=row['subscription_type']
+            subscription_type=row['subscription_type'],
+            subscription_level=subscription_level
         )
         logger.info(f"Найден платеж: {payment.order_id}, статус: {payment.status}")
     else:
@@ -1697,16 +1705,8 @@ async def check_payment_callback(callback: CallbackQuery, state: FSMContext):
             else:
                 subscription_end = subscription_start + new_subscription_duration
 
-            # Определяем уровень подписки из payment
-            subscription_level = getattr(payment, 'subscription_level', None) or 1
-            if not subscription_level:
-                # Fallback: определяем по месяцам для старых платежей
-                if payment.months >= 12:
-                    subscription_level = 3
-                elif payment.months >= 3:
-                    subscription_level = 2
-                else:
-                    subscription_level = 1
+            # Используем уровень подписки из платежа
+            subscription_level = payment.subscription_level if payment.subscription_level else 1
             
             subscription = Subscription(
                 user_id=payment.user_id,
@@ -2326,8 +2326,11 @@ async def handle_continue_path(callback: CallbackQuery, state: FSMContext):
         ])
     )
 
-def get_achievement_description(achievement_type: str, achievement_value: int) -> str:
+def get_achievement_description(achievement_type: str, achievement_value: int, custom_condition: Optional[str] = None) -> str:
     """Получение описания достижения"""
+    if achievement_type == 'custom' and custom_condition:
+        return custom_condition
+    
     if achievement_type == 'rank':
         from rank_config import RANK_NAMES
         # achievement_value соответствует индексу ранга (1 = F, 2 = E, ..., 8 = S+)
@@ -2390,13 +2393,17 @@ async def handle_prizes(message: Message, state: FSMContext):
     # Получаем данные пользователя
     user = await db.get_user(user_id)
 
-    # Получаем призы от главного модератора
-    admin_prizes = await db.get_prizes(prize_type=PrizeType.ADMIN, is_active=True)
+    # Получаем активную подписку пользователя
+    active_subscription = await db.get_active_subscription(user_id)
+    subscription_level = active_subscription.subscription_level if active_subscription else None
+
+    # Получаем призы от главного модератора (для всех и для уровня подписки пользователя)
+    admin_prizes = await db.get_prizes(prize_type=PrizeType.ADMIN, is_active=True, subscription_level=subscription_level)
 
     # Получаем призы от блогера (если есть реферальный код)
     blogger_prizes = []
     if user and user.referral_code:
-        blogger_prizes = await db.get_prizes(prize_type=PrizeType.BLOGGER, referral_code=user.referral_code, is_active=True)
+        blogger_prizes = await db.get_prizes(prize_type=PrizeType.BLOGGER, referral_code=user.referral_code, is_active=True, subscription_level=subscription_level)
 
     prize_text = "🎁 <b>Текущие призы</b>\n\n"
 
@@ -2404,10 +2411,14 @@ async def handle_prizes(message: Message, state: FSMContext):
     if admin_prizes:
         prize_text += "👑 <b>Призы от главного модератора:</b>\n"
         for prize in admin_prizes:
-            prize_text += f"{prize.emoji} <b>{prize.title}</b>\n"
+            prize_text += f"{prize.emoji} <b>{prize.title}</b>"
+            if prize.subscription_level:
+                level_names = {2: "Продвинутый", 3: "Мастер"}
+                prize_text += f" <i>(для уровня {prize.subscription_level} - {level_names.get(prize.subscription_level, '')})</i>"
+            prize_text += "\n"
             if prize.description:
                 prize_text += f"   └ {prize.description}\n"
-            prize_text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n\n"
+            prize_text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n\n"
     else:
         prize_text += "👑 <b>Призы от главного модератора:</b>\n"
         prize_text += "   └ Пока нет активных призов\n\n"
@@ -2417,10 +2428,14 @@ async def handle_prizes(message: Message, state: FSMContext):
         if blogger_prizes:
             prize_text += f"📣 <b>Призы от блогера '{user.referral_code}':</b>\n"
             for prize in blogger_prizes:
-                prize_text += f"{prize.emoji} <b>{prize.title}</b>\n"
+                prize_text += f"{prize.emoji} <b>{prize.title}</b>"
+                if prize.subscription_level:
+                    level_names = {2: "Продвинутый", 3: "Мастер"}
+                    prize_text += f" <i>(для уровня {prize.subscription_level} - {level_names.get(prize.subscription_level, '')})</i>"
+                prize_text += "\n"
                 if prize.description:
                     prize_text += f"   └ {prize.description}\n"
-                prize_text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value)}\n\n"
+                prize_text += f"   └ Достижение: {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n\n"
         else:
             prize_text += f"📣 <b>Призы от блогера '{user.referral_code}':</b>\n"
             prize_text += "   └ Пока нет активных призов\n\n"
@@ -2430,6 +2445,8 @@ async def handle_prizes(message: Message, state: FSMContext):
 
     prize_text += "🏆 <b>Система достижений:</b>\n"
     prize_text += "Призы начисляются автоматически при достижении целей!\n\n"
+    if subscription_level and subscription_level >= 2:
+        prize_text += f"⭐ <b>Вы имеете доступ к специальным призам для уровня {subscription_level}!</b>\n\n"
     prize_text += "<i>Следите за своими достижениями в профиле!</i>"
 
     await message.answer(
@@ -2582,6 +2599,10 @@ async def handle_rating(callback: CallbackQuery, state: FSMContext):
         )
         return
 
+    # Получаем активную подписку пользователя
+    active_subscription = await db.get_active_subscription(user_id)
+    subscription_level = active_subscription.subscription_level if active_subscription else None
+
     # Получаем топ пользователей по городу
     city_rating = await db.get_top_users_by_city(user.city, 10)
 
@@ -2592,6 +2613,14 @@ async def handle_rating(callback: CallbackQuery, state: FSMContext):
     referral_rating = None
     if user.referral_code:
         referral_rating = await db.get_top_users_by_referral_code(user.referral_code, 10)
+
+    # Получаем рейтинг по уровню подписки для уровней 2 и 3
+    level_2_rating = None
+    level_3_rating = None
+    if subscription_level and subscription_level >= 2:
+        level_2_rating = await db.get_top_users_by_subscription_level(2, 10)
+    if subscription_level and subscription_level >= 3:
+        level_3_rating = await db.get_top_users_by_subscription_level(3, 10)
 
     rating_text = "📊 <b>Рейтинг</b>\n\n"
 
@@ -2623,6 +2652,26 @@ async def handle_rating(callback: CallbackQuery, state: FSMContext):
     elif user.referral_code:
         rating_text += f"📣 <b>Топ подписчиков блогера '{user.referral_code}':</b>\n"
         rating_text += "Пока нет данных\n"
+
+    # Дополнительный рейтинг для уровня 2
+    if subscription_level and subscription_level >= 2:
+        rating_text += "\n"
+        rating_text += "⭐ <b>Топ уровня Продвинутый (уровень 2):</b>\n"
+        if level_2_rating:
+            for i, (name, level, exp, rank, city) in enumerate(level_2_rating, 1):
+                rating_text += f"{i}. {name} - Ур.{level} ({rank})\n"
+        else:
+            rating_text += "Пока нет данных\n"
+
+    # Дополнительный рейтинг для уровня 3
+    if subscription_level and subscription_level >= 3:
+        rating_text += "\n"
+        rating_text += "💎 <b>Топ уровня Мастер (уровень 3):</b>\n"
+        if level_3_rating:
+            for i, (name, level, exp, rank, city) in enumerate(level_3_rating, 1):
+                rating_text += f"{i}. {name} - Ур.{level} ({rank})\n"
+        else:
+            rating_text += "Пока нет данных\n"
 
     await callback.message.edit_text(
         rating_text,
@@ -3287,16 +3336,8 @@ async def payment_polling_task():
                     else:
                         subscription_end = subscription_start + new_subscription_duration
 
-                    # Определяем уровень подписки из payment
-                    subscription_level = getattr(payment, 'subscription_level', None) or 1
-                    if not subscription_level:
-                        # Fallback: определяем по месяцам для старых платежей
-                        if payment.months >= 12:
-                            subscription_level = 3
-                        elif payment.months >= 3:
-                            subscription_level = 2
-                        else:
-                            subscription_level = 1
+                    # Используем уровень подписки из платежа
+                    subscription_level = payment.subscription_level if payment.subscription_level else 1
                     
                     subscription = Subscription(
                         user_id=payment.user_id,
