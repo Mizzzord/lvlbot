@@ -311,17 +311,20 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
                     try:
                         import json
                         stats = json.loads(result_text)
+                        logger.info(f"ИИ вернул характеристики: {stats}")
 
                         # Валидируем и нормализуем значения
                         strength = max(1, min(100, int(stats.get('strength', 50))))
                         agility = max(1, min(100, int(stats.get('agility', 50))))
                         endurance = max(1, min(100, int(stats.get('endurance', 50))))
 
-                        return {
+                        result_stats = {
                             'strength': strength,
                             'agility': agility,
                             'endurance': endurance
                         }
+                        logger.info(f"Нормализованные характеристики: {result_stats}")
+                        return result_stats
                     except (json.JSONDecodeError, KeyError, ValueError) as e:
                         logger.error(f"Ошибка парсинга ответа ИИ: {e}, ответ: {result_text}")
                         # Возвращаем значения по умолчанию
@@ -1823,6 +1826,14 @@ async def process_player_photo(message: Message, state: FSMContext):
         rating_position = await db.get_user_rating_position(user_id)
 
         # Создаем изображение карточки игрока
+        card_stats = {
+            'strength': stats['strength'],
+            'agility': stats['agility'],
+            'endurance': stats['endurance'],
+            'intelligence': 50,
+            'charisma': 50
+        }
+        logger.info(f"Создание карточки с характеристиками: {card_stats}")
         try:
             # Сначала пытаемся использовать Node.js сервис
             card_image_path = await create_player_card_image_nodejs(
@@ -1832,13 +1843,7 @@ async def process_player_photo(message: Message, state: FSMContext):
                 level=level,
                 rank=rank,
                 rating_position=rating_position,
-                stats={
-                    'strength': stats['strength'],
-                    'agility': stats['agility'],
-                    'endurance': stats['endurance'],
-                    'intelligence': 50,
-                    'charisma': 50
-                }
+                stats=card_stats
             )
         except Exception as e:
             # Fallback на PIL если Node.js сервис недоступен
@@ -1847,13 +1852,7 @@ async def process_player_photo(message: Message, state: FSMContext):
                 photo_path=photo_path,
                 nickname=nickname,
                 experience=0,
-                stats={
-                    'strength': stats['strength'],
-                    'agility': stats['agility'],
-                    'endurance': stats['endurance'],
-                    'intelligence': 50,
-                    'charisma': 50
-                }
+                stats=card_stats
             )
 
         if is_photo_change:
@@ -1891,6 +1890,7 @@ async def process_player_photo(message: Message, state: FSMContext):
         else:
             # Это создание новой карточки
             # Создаем объект статов игрока
+            logger.info(f"Создаем PlayerStats для user_id={user_id} с характеристиками: strength={stats['strength']}, agility={stats['agility']}, endurance={stats['endurance']}")
             player_stats = PlayerStats(
                 user_id=user_id,
                 nickname=nickname,
@@ -1905,9 +1905,11 @@ async def process_player_photo(message: Message, state: FSMContext):
                 created_at=int(datetime.datetime.now().timestamp()),
                 updated_at=int(datetime.datetime.now().timestamp())
             )
+            logger.info(f"PlayerStats объект создан: strength={player_stats.strength}, agility={player_stats.agility}, endurance={player_stats.endurance}")
 
             # Сохраняем статы в базу данных
             await db.save_player_stats(player_stats)
+            logger.info(f"PlayerStats сохранены в БД для user_id={user_id}")
 
             # Создаем начальную статистику пользователя
             user_statistics = UserStats(
@@ -1997,14 +1999,23 @@ async def handle_get_task(message: Message, state: FSMContext):
     # Проверяем, есть ли уже активное задание
     active_task = await db.get_active_daily_task(user_id)
     if active_task:
-        logger.info(f"У пользователя {user_id} уже есть активное задание")
-        await message.answer(
-            "❌ <b>У вас уже есть активное задание!</b>\n\n"
-            "Сначала выполните текущее задание или дождитесь его истечения.\n\n"
-            "Используйте кнопку '📋 Активные задания' для просмотра.",
-            parse_mode="HTML",
-            reply_markup=create_main_menu_keyboard()
-        )
+        logger.info(f"У пользователя {user_id} уже есть активное задание со статусом {active_task.status}")
+        if active_task.status == TaskStatus.SUBMITTED:
+            await message.answer(
+                "⏳ <b>У вас есть задание на проверке!</b>\n\n"
+                "Ваше задание отправлено на проверку модератору. Дождитесь результата проверки.\n\n"
+                "Используйте кнопку '📋 Активные задания' для просмотра статуса.",
+                parse_mode="HTML",
+                reply_markup=create_main_menu_keyboard()
+            )
+        else:
+            await message.answer(
+                "❌ <b>У вас уже есть активное задание!</b>\n\n"
+                "Сначала выполните текущее задание или дождитесь его истечения.\n\n"
+                "Используйте кнопку '📋 Активные задания' для просмотра.",
+                parse_mode="HTML",
+                reply_markup=create_main_menu_keyboard()
+            )
         return
 
     # Получаем цель пользователя для генерации задания
@@ -2114,6 +2125,20 @@ async def handle_active_tasks(message: Message, state: FSMContext):
         )
         return
 
+    # Проверяем статус задания
+    if active_task.status == TaskStatus.SUBMITTED:
+        # Задание отправлено на проверку
+        await message.answer(
+            f"📋 <b>Ваше активное задание</b>\n\n"
+            f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
+            f"⏳ <b>Статус:</b> На проверке\n\n"
+            f"Ваше задание отправлено на проверку модератору. Ожидайте результата!",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+
+    # Задание ожидает выполнения
     # Форматируем время
     hours = time_left // 3600
     minutes = (time_left % 3600) // 60
@@ -2368,11 +2393,10 @@ def get_achievement_description(achievement_type: str, achievement_value: int, c
     }
     return descriptions.get(achievement_type, f'{achievement_type}: {achievement_value}')
 
-def get_profile_text(user, player_stats, user_statistics, db) -> str:
+async def get_profile_text(user, player_stats, user_statistics, db) -> str:
     """Формирование текста профиля"""
-    import asyncio
     # Получаем информацию о ранге асинхронно
-    rank_info = asyncio.run(db.get_user_rank_info(user.telegram_id))
+    rank_info = await db.get_user_rank_info(user.telegram_id)
 
     referral_text = f"🔗 <b>Реферальный код:</b> {user.referral_code}\n" if user.referral_code else ""
 
@@ -2517,6 +2541,16 @@ async def handle_task_submission(message: Message, state: FSMContext, media_type
         await message.answer(
             "❌ <b>У вас нет активного задания для сдачи!</b>\n\n"
             "Сначала получите задание через меню.",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+    
+    # Проверяем, что задание не уже отправлено на проверку
+    if active_task.status == TaskStatus.SUBMITTED:
+        await message.answer(
+            "⏳ <b>Задание уже отправлено на проверку!</b>\n\n"
+            "Ваше задание находится на проверке у модератора. Ожидайте результата.",
             parse_mode="HTML",
             reply_markup=create_main_menu_keyboard()
         )
@@ -2737,7 +2771,7 @@ async def handle_back_to_profile(callback: CallbackQuery, state: FSMContext):
             await callback.message.delete()  # Удаляем сообщение рейтинга
             await callback.message.answer_photo(
                 photo,
-                caption=get_profile_text(user, player_stats, user_statistics, db),
+                caption=await get_profile_text(user, player_stats, user_statistics, db),
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
@@ -2745,14 +2779,14 @@ async def handle_back_to_profile(callback: CallbackQuery, state: FSMContext):
             logger.error(f"Ошибка отправки фото профиля: {e}")
             # Если не удалось отправить фото, отправляем текстовую версию
             await callback.message.edit_text(
-                get_profile_text(user, player_stats, user_statistics, db),
+                await get_profile_text(user, player_stats, user_statistics, db),
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
     else:
         # Отправляем текстовую версию профиля
         await callback.message.edit_text(
-            get_profile_text(user, player_stats, user_statistics),
+            await get_profile_text(user, player_stats, user_statistics, db),
             parse_mode="HTML",
             reply_markup=keyboard
         )
@@ -2863,11 +2897,8 @@ async def handle_profile_callback(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    # Получаем информацию о ранге
-    rank_info = await db.get_user_rank_info(user_id)
-
     # Формируем текст профиля
-    profile_text = get_profile_text(user, player_stats, user_statistics, db)
+    profile_text = await get_profile_text(user, player_stats, user_statistics, db)
 
     # Создаем клавиатуру профиля
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -3322,6 +3353,10 @@ async def handle_unknown(message: Message, state: FSMContext):
 
 async def payment_polling_task():
     """Фоновая задача для периодической проверки неоплаченных платежей"""
+    # Получаем bot_id один раз при старте задачи
+    bot_info = await bot.get_me()
+    bot_id = bot_info.id
+    
     while True:
         try:
             # Получаем все неоплаченные платежи из БД
@@ -3375,15 +3410,47 @@ async def payment_polling_task():
                     # Активируем подписку пользователя
                     await db.activate_user_subscription(payment.user_id, subscription_start, subscription_end)
 
+                    # Проверяем, есть ли у пользователя карточка игрока
+                    player_stats = await db.get_player_stats(payment.user_id)
+                    
                     # Уведомляем пользователя об успешной оплате
                     try:
-                        await bot.send_message(
-                            payment.user_id,
-                            f"✅ Оплата получена!\n\n"
-                            f"🎉 Подписка на {payment.months} месяцев активирована!\n\n"
-                            f"📅 Дата окончания: {datetime.datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')}\n\n"
-                            f"🚀 Теперь вы можете пользоваться всеми функциями бота!"
-                        )
+                        if not player_stats:
+                            # Если карточки нет, устанавливаем состояние ожидания фото и отправляем сообщение
+                            from aiogram.fsm.storage.base import StorageKey
+                            storage_key = StorageKey(
+                                chat_id=payment.user_id,
+                                user_id=payment.user_id,
+                                bot_id=bot_id
+                            )
+                            await dp.storage.set_state(storage_key, UserRegistration.waiting_for_player_photo)
+                            
+                            await bot.send_message(
+                                payment.user_id,
+                                f"✅ Оплата получена!\n\n"
+                                f"🎉 Подписка на {payment.months} месяцев активирована!\n\n"
+                                f"📅 Дата окончания: {datetime.datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')}\n\n"
+                                f"🎮 <b>Обязательный этап: Создание карточки игрока</b>\n\n"
+                                f"📸 Пожалуйста, загрузите ваше фото для создания игровой карточки.\n"
+                                f"ИИ проанализирует ваше фото и определит стартовые характеристики:\n"
+                                f"• 💪 Сила\n"
+                                f"• 🤸 Ловкость\n"
+                                f"• 🏃 Выносливость\n"
+                                f"• 🧠 Интеллект (базовый: 50/100)\n"
+                                f"• ✨ Харизма (базовый: 50/100)\n\n"
+                                f"После анализа будет создана ваша уникальная игровая карточка!",
+                                parse_mode="HTML"
+                            )
+                            logger.info(f"Пользователь {payment.user_id} переведен в состояние ожидания фото после успешной оплаты")
+                        else:
+                            # Если карточка уже есть, просто отправляем уведомление
+                            await bot.send_message(
+                                payment.user_id,
+                                f"✅ Оплата получена!\n\n"
+                                f"🎉 Подписка на {payment.months} месяцев активирована!\n\n"
+                                f"📅 Дата окончания: {datetime.datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')}\n\n"
+                                f"🚀 Теперь вы можете пользоваться всеми функциями бота!"
+                            )
                     except Exception as e:
                         logger.error(f"Не удалось отправить уведомление пользователю {payment.user_id}: {e}")
 

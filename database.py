@@ -328,16 +328,33 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT UNIQUE,
                     nickname TEXT,
+                    experience INTEGER DEFAULT 0,
                     strength INTEGER DEFAULT 50,
                     agility INTEGER DEFAULT 50,
                     endurance INTEGER DEFAULT 50,
                     intelligence INTEGER DEFAULT 50,
                     charisma INTEGER DEFAULT 50,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    photo_path TEXT,
+                    card_image_path TEXT,
+                    created_at BIGINT,
+                    updated_at BIGINT,
                     FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
                 )
             ''')
+            
+            # Добавляем недостающие колонки, если они отсутствуют (для совместимости с существующими БД)
+            try:
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS experience INTEGER DEFAULT 0')
+            except Exception:
+                pass
+            try:
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS photo_path TEXT')
+            except Exception:
+                pass
+            try:
+                await conn.execute('ALTER TABLE player_stats ADD COLUMN IF NOT EXISTS card_image_path TEXT')
+            except Exception:
+                pass
 
             # Создаем таблицу статистики пользователя
             await conn.execute('''
@@ -1214,66 +1231,151 @@ class Database:
 
     async def save_player_stats(self, stats: PlayerStats) -> int:
         """Сохранение или обновление статов игрока"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute('''
-                INSERT INTO player_stats (user_id, nickname, experience, strength, agility, endurance, intelligence, charisma, photo_path, card_image_path, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    nickname = excluded.nickname,
-                    experience = excluded.experience,
-                    strength = excluded.strength,
-                    agility = excluded.agility,
-                    endurance = excluded.endurance,
-                    intelligence = excluded.intelligence,
-                    charisma = excluded.charisma,
-                    photo_path = excluded.photo_path,
-                    card_image_path = excluded.card_image_path,
-                    updated_at = excluded.updated_at
-            ''', (
-                stats.user_id,
-                stats.nickname,
-                stats.experience,
-                stats.strength,
-                stats.agility,
-                stats.endurance,
-                stats.intelligence,
-                stats.charisma,
-                stats.photo_path,
-                stats.card_image_path,
-                stats.created_at,
-                stats.updated_at
-            ))
-            stats_id = cursor.lastrowid or stats.id
-            await db.commit()
-            logger.info(f"Стати игрока для пользователя {stats.user_id} сохранены")
-            return stats_id
+        logger.info(f"Сохранение PlayerStats для user_id={stats.user_id}: strength={stats.strength}, agility={stats.agility}, endurance={stats.endurance}, intelligence={stats.intelligence}, charisma={stats.charisma}")
+        
+        if self.use_postgres:
+            conn_string = get_postgres_connection_string()
+            conn = await asyncpg.connect(conn_string)
+            try:
+                row = await conn.fetchrow('''
+                    INSERT INTO player_stats (user_id, nickname, experience, strength, agility, endurance, intelligence, charisma, photo_path, card_image_path, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        nickname = EXCLUDED.nickname,
+                        experience = EXCLUDED.experience,
+                        strength = EXCLUDED.strength,
+                        agility = EXCLUDED.agility,
+                        endurance = EXCLUDED.endurance,
+                        intelligence = EXCLUDED.intelligence,
+                        charisma = EXCLUDED.charisma,
+                        photo_path = EXCLUDED.photo_path,
+                        card_image_path = EXCLUDED.card_image_path,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING id
+                ''', (
+                    stats.user_id,
+                    stats.nickname,
+                    stats.experience,
+                    stats.strength,
+                    stats.agility,
+                    stats.endurance,
+                    stats.intelligence,
+                    stats.charisma,
+                    stats.photo_path,
+                    stats.card_image_path,
+                    stats.created_at,
+                    stats.updated_at
+                ))
+                stats_id = row['id'] if row else (stats.id if stats.id else None)
+                logger.info(f"PlayerStats сохранены в PostgreSQL для user_id={stats.user_id}, id={stats_id}")
+                return stats_id
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO player_stats (user_id, nickname, experience, strength, agility, endurance, intelligence, charisma, photo_path, card_image_path, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        nickname = excluded.nickname,
+                        experience = excluded.experience,
+                        strength = excluded.strength,
+                        agility = excluded.agility,
+                        endurance = excluded.endurance,
+                        intelligence = excluded.intelligence,
+                        charisma = excluded.charisma,
+                        photo_path = excluded.photo_path,
+                        card_image_path = excluded.card_image_path,
+                        updated_at = excluded.updated_at
+                ''', (
+                    stats.user_id,
+                    stats.nickname,
+                    stats.experience,
+                    stats.strength,
+                    stats.agility,
+                    stats.endurance,
+                    stats.intelligence,
+                    stats.charisma,
+                    stats.photo_path,
+                    stats.card_image_path,
+                    stats.created_at,
+                    stats.updated_at
+                ))
+                stats_id = cursor.lastrowid or stats.id
+                await db.commit()
+                logger.info(f"PlayerStats сохранены в SQLite для user_id={stats.user_id}, id={stats_id}")
+                return stats_id
 
     async def get_player_stats(self, user_id: int) -> Optional[PlayerStats]:
         """Получение статов игрока"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT * FROM player_stats WHERE user_id = ?
-            ''', (user_id,))
+        if self.use_postgres:
+            conn_string = get_postgres_connection_string()
+            conn = await asyncpg.connect(conn_string)
+            try:
+                row = await conn.fetchrow('''
+                    SELECT * FROM player_stats WHERE user_id = $1
+                ''', user_id)
+                
+                if row:
+                    # Преобразуем timestamp в int, если это datetime
+                    created_at = row['created_at']
+                    updated_at = row['updated_at']
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    elif created_at is None:
+                        created_at = 0
+                    if isinstance(updated_at, datetime.datetime):
+                        updated_at = int(updated_at.timestamp())
+                    elif updated_at is None:
+                        updated_at = 0
+                    
+                    stats = PlayerStats(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        nickname=row['nickname'],
+                        experience=row.get('experience', 0) or 0,
+                        strength=row['strength'],
+                        agility=row['agility'],
+                        endurance=row['endurance'],
+                        intelligence=row['intelligence'],
+                        charisma=row['charisma'],
+                        photo_path=row.get('photo_path'),
+                        card_image_path=row.get('card_image_path'),
+                        created_at=created_at,
+                        updated_at=updated_at
+                    )
+                    logger.info(f"Получены PlayerStats из PostgreSQL для user_id={user_id}: strength={stats.strength}, agility={stats.agility}, endurance={stats.endurance}")
+                    return stats
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM player_stats WHERE user_id = ?
+                ''', (user_id,))
 
-            row = await cursor.fetchone()
-            if row:
-                return PlayerStats(
-                    id=row['id'],
-                    user_id=row['user_id'],
-                    nickname=row['nickname'],
-                    experience=row['experience'],
-                    strength=row['strength'],
-                    agility=row['agility'],
-                    endurance=row['endurance'],
-                    intelligence=row['intelligence'],
-                    charisma=row['charisma'],
-                    photo_path=row['photo_path'],
-                    card_image_path=row['card_image_path'],
-                    created_at=row['created_at'],
-                    updated_at=row['updated_at']
-                )
-            return None
+                row = await cursor.fetchone()
+                if row:
+                    stats = PlayerStats(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        nickname=row['nickname'],
+                        experience=row['experience'],
+                        strength=row['strength'],
+                        agility=row['agility'],
+                        endurance=row['endurance'],
+                        intelligence=row['intelligence'],
+                        charisma=row['charisma'],
+                        photo_path=row['photo_path'],
+                        card_image_path=row['card_image_path'],
+                        created_at=row['created_at'],
+                        updated_at=row['updated_at']
+                    )
+                    logger.info(f"Получены PlayerStats из SQLite для user_id={user_id}: strength={stats.strength}, agility={stats.agility}, endurance={stats.endurance}")
+                    return stats
+                return None
 
     # Методы для работы с ежедневными заданиями
 
@@ -1299,30 +1401,57 @@ class Database:
             return task_id
 
     async def get_active_daily_task(self, user_id: int) -> Optional[DailyTask]:
-        """Получение активного ежедневного задания пользователя (ожидающего выполнения)"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT * FROM daily_tasks
-                WHERE user_id = ? AND status = 'pending' AND expires_at > ?
-                ORDER BY created_at DESC
-                LIMIT 1
-            ''', (user_id, int(datetime.datetime.now().timestamp())))
+        """Получение активного ежедневного задания пользователя (ожидающего выполнения или на проверке)"""
+        if self.use_postgres:
+            conn_string = get_postgres_connection_string()
+            conn = await asyncpg.connect(conn_string)
+            try:
+                row = await conn.fetchrow('''
+                    SELECT * FROM daily_tasks
+                    WHERE user_id = $1 AND status IN ('pending', 'submitted') AND expires_at > $2
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ''', user_id, int(datetime.datetime.now().timestamp()))
+                
+                if row:
+                    return DailyTask(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        task_description=row['task_description'],
+                        created_at=row['created_at'],
+                        expires_at=row['expires_at'],
+                        status=TaskStatus(row['status']),
+                        completed_at=row['completed_at'],
+                        submitted_media_path=row.get('submitted_media_path'),
+                        moderator_comment=row.get('moderator_comment')
+                    )
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM daily_tasks
+                    WHERE user_id = ? AND status IN ('pending', 'submitted') AND expires_at > ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ''', (user_id, int(datetime.datetime.now().timestamp())))
 
-            row = await cursor.fetchone()
-            if row:
-                return DailyTask(
-                    id=row['id'],
-                    user_id=row['user_id'],
-                    task_description=row['task_description'],
-                    created_at=row['created_at'],
-                    expires_at=row['expires_at'],
-                    status=TaskStatus(row['status']),
-                    completed_at=row['completed_at'],
-                    submitted_media_path=row['submitted_media_path'],
-                    moderator_comment=row['moderator_comment']
-                )
-            return None
+                row = await cursor.fetchone()
+                if row:
+                    return DailyTask(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        task_description=row['task_description'],
+                        created_at=row['created_at'],
+                        expires_at=row['expires_at'],
+                        status=TaskStatus(row['status']),
+                        completed_at=row['completed_at'],
+                        submitted_media_path=row['submitted_media_path'],
+                        moderator_comment=row['moderator_comment']
+                    )
+                return None
 
     async def submit_daily_task_media(self, task_id: int, media_path: str) -> bool:
         """Отправить медиафайл для задания на модерацию"""
