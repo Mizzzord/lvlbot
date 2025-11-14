@@ -1,266 +1,232 @@
 const { createCanvas, loadImage, registerFont } = require('canvas');
+const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 
 /**
- * Создает изображение карточки игрока с помощью Canvas API
+ * Создает изображение карточки игрока с помощью Canvas API в новом дизайне из Figma
  * @param {string} photoPath - путь к фото пользователя
  * @param {string} nickname - ник игрока
  * @param {number} experience - опыт игрока
+ * @param {number} level - уровень игрока
+ * @param {string} rank - ранг игрока (например, "S", "A", "B", и т.д.)
+ * @param {number} ratingPosition - позиция в общем рейтинге
  * @param {object} stats - словарь с характеристиками
  * @returns {Promise<Buffer>} - буфер изображения PNG
  */
-async function createPlayerCardImage(photoPath, nickname, experience, stats) {
+async function createPlayerCardImage(photoPath, nickname, experience, level, rank, ratingPosition, stats) {
     try {
         console.log(`Создание карточки для ${nickname} с помощью Canvas...`);
 
-        // Размеры карточки
-        const width = 800;
-        const height = 1200;
+        // Размеры карточки (пропорционально дизайну из Figma)
+        const width = 1866;
+        const height = 1399;
 
         // Создаем Canvas
         const canvas = createCanvas(width, height);
         const ctx = canvas.getContext('2d');
 
-        // Градиентный фон
-        const bgGradient = ctx.createLinearGradient(0, 0, 0, height);
-        bgGradient.addColorStop(0, '#1a1a2e');
-        bgGradient.addColorStop(0.5, '#16213e');
-        bgGradient.addColorStop(1, '#0f3460');
-
-        ctx.fillStyle = bgGradient;
-        ctx.fillRect(0, 0, width, height);
-
-        // Декоративный круг свечения вверху
-        const glowGradient = ctx.createRadialGradient(width/2, 100, 0, width/2, 100, 200);
-        glowGradient.addColorStop(0, 'rgba(74, 144, 226, 0.3)');
-        glowGradient.addColorStop(1, 'rgba(74, 144, 226, 0)');
-
-        ctx.fillStyle = glowGradient;
-        ctx.beginPath();
-        ctx.arc(width/2, 100, 200, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Внешняя рамка с градиентом
-        const goldGradient = ctx.createLinearGradient(0, 0, width, 0);
-        goldGradient.addColorStop(0, '#FFD700');
-        goldGradient.addColorStop(0.5, '#FFA500');
-        goldGradient.addColorStop(1, '#FFD700');
-
-        ctx.strokeStyle = goldGradient;
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.roundRect(15, 15, width-30, height-30, 20);
-        ctx.stroke();
-
-        // Внутренняя рамка
-        ctx.strokeStyle = '#4A90E2';
-        ctx.lineWidth = 2;
-        ctx.globalAlpha = 0.5;
-        ctx.beginPath();
-        ctx.roundRect(20, 20, width-40, height-40, 18);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-
-        // Настройки шрифта
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-
-        // Заголовок
-        ctx.fillStyle = '#FFD700';
-        ctx.font = 'bold 42px Arial, sans-serif';
-        ctx.fillText('ИГРОВАЯ КАРТОЧКА', width/2, 70);
-
-        // Декоративная линия под заголовком
-        ctx.strokeStyle = goldGradient;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(width/2 - 150, 85);
-        ctx.lineTo(width/2 + 150, 85);
-        ctx.stroke();
-
-        // Ник игрока
-        ctx.fillStyle = goldGradient;
-        ctx.font = 'bold 32px Arial, sans-serif';
-        ctx.fillText(nickname || 'Игрок', width/2, 140);
-
-        // Опыт в рамке
-        ctx.fillStyle = '#0f3460';
-        ctx.strokeStyle = '#4A90E2';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.roundRect(width/2 - 80, 155, 160, 35, 17.5);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = '#FFD700';
-        ctx.font = 'bold 16px Arial, sans-serif';
-        ctx.fillText(`⭐ Опыт: ${experience || 0}`, width/2, 172.5);
-
-        // Заголовок характеристик
-        ctx.fillStyle = '#4A90E2';
-        ctx.font = 'bold 24px Arial, sans-serif';
-        ctx.fillText('ХАРАКТЕРИСТИКИ', width/2, 440);
-
-        // Линия под заголовком характеристик
-        ctx.strokeStyle = '#4A90E2';
-        ctx.lineWidth = 1;
-        ctx.globalAlpha = 0.5;
-        ctx.beginPath();
-        ctx.moveTo(100, 455);
-        ctx.lineTo(width - 100, 455);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-
-        // Характеристики
-                const statNames = {
-            strength: { name: '💪 Сила', color: '#FF6B6B' },
-            agility: { name: '⚡ Ловкость', color: '#4ECDC4' },
-            endurance: { name: '🛡️ Выносливость', color: '#45B7D1' },
-            intelligence: { name: '🧠 Интеллект', color: '#A06CD5' },
-            charisma: { name: '✨ Харизма', color: '#FFD93D' }
-        };
-
-                let currentY = 490;
-        const barWidth = width - 240;
-        const barHeight = 12;
-
-                for (const [key, info] of Object.entries(statNames)) {
-                    const value = stats[key] || 50;
-                    const percentage = Math.min(value, 100);
-
-            // Фон для характеристики
-            ctx.fillStyle = 'rgba(15, 52, 96, 0.5)';
-            ctx.beginPath();
-            ctx.roundRect(60, currentY, width - 120, 55, 10);
-            ctx.fill();
-
-            // Название характеристики
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = 'bold 18px Arial, sans-serif';
-            ctx.textAlign = 'left';
-            ctx.fillText(info.name, 120, currentY + 25);
-
-            // Значение характеристики
-            ctx.fillStyle = info.color;
-            ctx.font = 'bold 18px Arial, sans-serif';
-            ctx.textAlign = 'right';
-            ctx.fillText(value.toString(), width - 100, currentY + 25);
-
-            // Полоса прогресса - фон
-            ctx.fillStyle = '#1a1a2e';
-            ctx.strokeStyle = '#4A90E2';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.roundRect(120, currentY + 35, barWidth, barHeight, 6);
-            ctx.fill();
-            ctx.stroke();
-
-            // Полоса прогресса - заполнение
-                    const progressWidth = (barWidth * percentage) / 100;
-            const gradient = ctx.createLinearGradient(120, 0, 120 + progressWidth, 0);
-            gradient.addColorStop(0, info.color + 'CC'); // с прозрачностью
-            gradient.addColorStop(1, info.color);
-
-            ctx.fillStyle = gradient;
-            ctx.beginPath();
-            ctx.roundRect(120 + 1, currentY + 36, progressWidth - 2, barHeight - 2, 5);
-            ctx.fill();
-                    
-                    // Процентная отметка
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = 'bold 10px Arial, sans-serif';
-            ctx.textAlign = 'right';
-            ctx.fillText(`${value}%`, 120 + progressWidth - 5, currentY + 41);
-
-                    currentY += 70;
-                }
-
-        // Декоративный элемент внизу
-        ctx.strokeStyle = goldGradient;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(100, height - 80);
-        ctx.lineTo(width - 100, height - 80);
-        ctx.stroke();
-
-        // Нижний текст
-        ctx.fillStyle = '#4A90E2';
-        ctx.font = 'bold 16px Arial, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('🎮 @motivation_lvl_bot', width/2, height - 50);
-
-        ctx.fillStyle = '#AAAAAA';
-        ctx.font = '12px Arial, sans-serif';
-        ctx.fillText('Твой путь к цели начинается здесь', width/2, height - 25);
-
-        // Добавляем фото, если оно есть
+        // Загружаем фото пользователя как фон
         if (photoPath && fs.existsSync(photoPath)) {
             try {
-                const photo = await loadImage(photoPath);
-
-                // Создаем круглое фото
-                const avatarSize = 150;
-                const avatarX = (width - avatarSize) / 2;
-                const avatarY = 235;
-
-                // Сохраняем текущий контекст
-                ctx.save();
-
-                // Создаем круглую маску
-                ctx.beginPath();
-                ctx.arc(avatarX + avatarSize/2, avatarY + avatarSize/2, avatarSize/2, 0, Math.PI * 2);
-                ctx.clip();
-
-                // Вычисляем размеры для обрезки
-                const scale = Math.max(avatarSize / photo.width, avatarSize / photo.height);
+                // Конвертируем изображение в PNG через sharp для поддержки JPEG и других форматов
+                let imageBuffer;
+                const ext = path.extname(photoPath).toLowerCase();
+                if (ext === '.jpg' || ext === '.jpeg' || ext === '.png' || ext === '.webp') {
+                    imageBuffer = await sharp(photoPath).png().toBuffer();
+                } else {
+                    imageBuffer = await fs.promises.readFile(photoPath);
+                }
+                
+                const photo = await loadImage(imageBuffer);
+                // Рисуем фото на весь экран с центрированием
+                const scale = Math.max(width / photo.width, height / photo.height);
                 const scaledWidth = photo.width * scale;
                 const scaledHeight = photo.height * scale;
-                const offsetX = (avatarSize - scaledWidth) / 2;
-                const offsetY = (avatarSize - scaledHeight) / 2;
-
-                // Рисуем фото
-                ctx.drawImage(photo, avatarX + offsetX, avatarY + offsetY, scaledWidth, scaledHeight);
-
-                // Восстанавливаем контекст
-                ctx.restore();
-
-                // Рисуем рамку вокруг аватара
-                ctx.strokeStyle = goldGradient;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                ctx.arc(avatarX + avatarSize/2, avatarY + avatarSize/2, avatarSize/2, 0, Math.PI * 2);
-                ctx.stroke();
-
+                const offsetX = (width - scaledWidth) / 2;
+                const offsetY = (height - scaledHeight) / 2;
+                ctx.drawImage(photo, offsetX, offsetY, scaledWidth, scaledHeight);
             } catch (photoError) {
-                console.warn(`Не удалось обработать фото: ${photoError.message}`);
-                // Рисуем placeholder
-                ctx.fillStyle = '#0f3460';
-                ctx.strokeStyle = goldGradient;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                ctx.arc(width/2, 310, 75, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.stroke();
-
-                ctx.fillStyle = '#FFD700';
-                ctx.font = '60px Arial, sans-serif';
-                ctx.fillText('👤', width/2, 310);
+                console.warn(`Не удалось загрузить фото: ${photoError.message}`);
+                // Темный фон если фото не загрузилось
+                ctx.fillStyle = '#1e1e1e';
+                ctx.fillRect(0, 0, width, height);
             }
         } else {
-            // Рисуем placeholder для аватара
-            ctx.fillStyle = '#0f3460';
-            ctx.strokeStyle = goldGradient;
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            ctx.arc(width/2, 310, 75, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.stroke();
-
-            ctx.fillStyle = '#FFD700';
-            ctx.font = '60px Arial, sans-serif';
-            ctx.fillText('👤', width/2, 310);
+            // Темный фон если фото нет
+            ctx.fillStyle = '#1e1e1e';
+            ctx.fillRect(0, 0, width, height);
         }
+
+        // Загружаем логотип (если есть)
+        const logoPath = path.join(__dirname, 'изображение', 'logo', 'logo.png');
+        if (fs.existsSync(logoPath)) {
+            try {
+                const logo = await loadImage(logoPath);
+                const logoWidth = 251.5;
+                const logoHeight = 223;
+                ctx.drawImage(logo, 20, 18, logoWidth, logoHeight);
+            } catch (logoError) {
+                console.warn(`Не удалось загрузить логотип: ${logoError.message}`);
+            }
+        }
+
+        // Темная панель внизу
+        const panelWidth = 1040;
+        const panelHeight = 500;
+        const panelX = (width - panelWidth) / 2;
+        const panelY = 830;
+        const borderRadius = 30;
+
+        // Рисуем панель с закругленными углами
+        ctx.fillStyle = '#1e1e1e';
+        ctx.beginPath();
+        ctx.roundRect(panelX, panelY, panelWidth, panelHeight, borderRadius);
+        ctx.fill();
+
+        // Внутренний отступ панели
+        const padding = 40;
+        const contentX = panelX + padding;
+        const contentY = panelY + (panelHeight / 2);
+        const contentWidth = panelWidth - (padding * 2);
+
+        // Имя игрока (96px)
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 96px Arial, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(nickname || 'Игрок', contentX, contentY - 200);
+
+        // Ранг и уровень справа (48px, opacity 60%)
+        ctx.globalAlpha = 0.6;
+        ctx.font = '48px Arial, sans-serif';
+        ctx.textAlign = 'right';
+        const rankText = `${rank || 'F'} ранг`;
+        const levelText = `Ур. ${level || 1}`;
+        const rankWidth = ctx.measureText(rankText).width;
+        const levelWidth = ctx.measureText(levelText).width;
+        const statsHeaderX = panelX + panelWidth - padding;
+        ctx.fillText(rankText, statsHeaderX, contentY - 200);
+        ctx.fillText(levelText, statsHeaderX, contentY - 200 + 60);
+        ctx.globalAlpha = 1;
+
+        // Статистики в сетке 2x3
+        const iconsDir = path.join(__dirname, 'изображение', 'icons');
+        const statConfig = [
+            { key: 'strength', name: 'Сила', icon: path.join(iconsDir, 'strength.svg'), row: 0, col: 0 },
+            { key: 'endurance', name: 'Выносливость', icon: path.join(iconsDir, 'endurance.svg'), row: 0, col: 1 },
+            { key: 'charisma', name: 'Харизма', icon: path.join(iconsDir, 'charisma.svg'), row: 0, col: 2 },
+            { key: 'agility', name: 'Ловкость', icon: path.join(iconsDir, 'agility.svg'), row: 1, col: 0 },
+            { key: 'intelligence', name: 'Интеллект', icon: path.join(iconsDir, 'intelligence.svg'), row: 1, col: 1 },
+            { key: 'experience', name: 'Опыт', icon: null, row: 1, col: 2 }
+        ];
+
+        const statWidth = 216;
+        const statHeight = 120;
+        const statGapX = 19;
+        const statGapY = 26;
+        const statsStartX = contentX;
+        const statsStartY = contentY - 100;
+
+        for (const config of statConfig) {
+            const statX = statsStartX + config.col * (statWidth + statGapX);
+            const statY = statsStartY + config.row * (statHeight + statGapY);
+
+            // Получаем значение статистики
+            let value;
+            if (config.key === 'experience') {
+                value = experience || 0;
+            } else {
+                value = stats[config.key] || 50;
+            }
+
+            // Название статистики (24px, italic)
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = 'italic 24px Arial, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            
+            // Иконка (если есть)
+            let iconX = statX;
+            if (config.icon) {
+                if (fs.existsSync(config.icon)) {
+                    try {
+                        // Конвертируем SVG в PNG через sharp
+                        let iconBuffer;
+                        if (config.icon.endsWith('.svg')) {
+                            iconBuffer = await sharp(config.icon)
+                                .resize(36, 36)
+                                .png()
+                                .toBuffer();
+                        } else {
+                            iconBuffer = await fs.promises.readFile(config.icon);
+                        }
+                        
+                        const icon = await loadImage(iconBuffer);
+                        const iconSize = 36;
+                        ctx.drawImage(icon, iconX, statY, iconSize, iconSize);
+                        iconX += iconSize + 9;
+                    } catch (iconError) {
+                        console.warn(`Не удалось загрузить иконку ${config.icon}: ${iconError.message}`);
+                    }
+                }
+            }
+
+            ctx.fillText(config.name, iconX, statY);
+
+            // Значение статистики (57.73px, bold)
+            ctx.font = 'bold 57.73px Arial, sans-serif';
+            ctx.textBaseline = 'top';
+            ctx.fillText(value.toString(), statX, statY + 31);
+
+            // Прогресс-бар
+            const barWidth = statWidth;
+            const barHeight = 17.581;
+            const barY = statY + 100;
+
+            // Фон прогресс-бара (#2a2a2a)
+            ctx.fillStyle = '#2a2a2a';
+            ctx.beginPath();
+            ctx.roundRect(statX, barY, barWidth, barHeight, 25);
+            ctx.fill();
+
+            // Заполнение прогресс-бара (#50ff1b)
+            const progressPercentage = Math.min(value, 100) / 100;
+            const progressWidth = barWidth * progressPercentage;
+            ctx.fillStyle = '#50ff1b';
+            ctx.beginPath();
+            ctx.roundRect(statX, barY + 0.42, progressWidth, barHeight, 25);
+            ctx.fill();
+        }
+
+        // Боковая панель с рейтингом (250px ширина)
+        const ratingPanelWidth = 250;
+        const ratingPanelX = panelX + panelWidth - ratingPanelWidth - padding;
+        const ratingPanelY = contentY - 100;
+        const ratingPanelHeight = statHeight * 2 + statGapY;
+
+        // Фон боковой панели (#343434)
+        ctx.fillStyle = '#343434';
+        ctx.beginPath();
+        ctx.roundRect(ratingPanelX, ratingPanelY, ratingPanelWidth, ratingPanelHeight, 30);
+        ctx.fill();
+
+        // Текст "Место в общем рейтинге"
+        ctx.fillStyle = '#FFFFFF';
+        ctx.globalAlpha = 0.6;
+        ctx.font = '33.231px Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const ratingTextY = ratingPanelY + 76;
+        ctx.fillText('Место', ratingPanelX + ratingPanelWidth / 2, ratingTextY);
+        ctx.font = '22.154px Arial, sans-serif';
+        ctx.fillText('в общем рейтинге', ratingPanelX + ratingPanelWidth / 2, ratingTextY + 33);
+
+        // Позиция в рейтинге (64px)
+        ctx.globalAlpha = 1;
+        ctx.font = 'bold 64px Arial, sans-serif';
+        const positionText = `№${String(ratingPosition || 0).padStart(7, '0')}`;
+        ctx.fillText(positionText, ratingPanelX + ratingPanelWidth / 2, ratingTextY + 80);
 
         // Получаем буфер изображения
         const buffer = canvas.toBuffer('image/png');

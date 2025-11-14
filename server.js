@@ -69,6 +69,9 @@ setInterval(cleanupTempFiles, 60 * 60 * 1000);
  *   "photoPath": "путь к фото на сервере",
  *   "nickname": "ник игрока",
  *   "experience": 0,
+ *   "level": 1,
+ *   "rank": "F",
+ *   "ratingPosition": 0,
  *   "stats": {
  *     "strength": 75,
  *     "agility": 60,
@@ -80,7 +83,7 @@ setInterval(cleanupTempFiles, 60 * 60 * 1000);
  */
 app.post('/generate-card', async (req, res) => {
     try {
-        const { photoPath, nickname, experience, stats } = req.body;
+        const { photoPath, nickname, experience, level, rank, ratingPosition, stats } = req.body;
 
         // Валидация входных данных
         if (!nickname || typeof experience !== 'number' || !stats) {
@@ -93,7 +96,15 @@ app.post('/generate-card', async (req, res) => {
         console.log(`Генерация карточки для пользователя: ${nickname}`);
 
         // Генерируем изображение
-        const imageBuffer = await createPlayerCardImage(photoPath, nickname, experience, stats);
+        const imageBuffer = await createPlayerCardImage(
+            photoPath, 
+            nickname, 
+            experience || 0, 
+            level || 1, 
+            rank || 'F', 
+            ratingPosition || 0, 
+            stats
+        );
 
         // Устанавливаем заголовки для ответа
         res.setHeader('Content-Type', 'image/png');

@@ -334,7 +334,7 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
         logger.error(f"Error analyzing player photo: {e}")
         return {'strength': 50, 'agility': 50, 'endurance': 50}
 
-async def create_player_card_image_nodejs(photo_path: str, nickname: str, experience: int, stats: dict) -> str:
+async def create_player_card_image_nodejs(photo_path: str, nickname: str, experience: int, level: int, rank: str, rating_position: int, stats: dict) -> str:
     """
     Создает изображение карточки игрока с помощью Node.js сервиса
 
@@ -342,6 +342,9 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
         photo_path: путь к фото пользователя
         nickname: ник игрока
         experience: опыт игрока
+        level: уровень игрока
+        rank: ранг игрока
+        rating_position: позиция в общем рейтинге
         stats: словарь с характеристиками
 
     Returns:
@@ -354,6 +357,9 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
                 "photoPath": photo_path,
                 "nickname": nickname,
                 "experience": experience,
+                "level": level,
+                "rank": rank,
+                "ratingPosition": rating_position,
                 "stats": stats
             }
 
@@ -1807,13 +1813,25 @@ async def process_player_photo(message: Message, state: FSMContext):
             await message.answer("🤖 Анализирую ваше фото и определяю характеристики...")
             stats = await analyze_player_photo(photo_bytes)
 
+        # Получаем статистику пользователя для карточки
+        user_stats = await db.get_user_stats(user_id)
+        level = user_stats.level if user_stats else 1
+        rank = user_stats.rank.value if user_stats else 'F'
+        experience = user_stats.experience if user_stats else 0
+        
+        # Получаем позицию в рейтинге
+        rating_position = await db.get_user_rating_position(user_id)
+
         # Создаем изображение карточки игрока
         try:
             # Сначала пытаемся использовать Node.js сервис
             card_image_path = await create_player_card_image_nodejs(
                 photo_path=photo_path,
                 nickname=nickname,
-                experience=0,
+                experience=experience,
+                level=level,
+                rank=rank,
+                rating_position=rating_position,
                 stats={
                     'strength': stats['strength'],
                     'agility': stats['agility'],
@@ -2719,7 +2737,7 @@ async def handle_back_to_profile(callback: CallbackQuery, state: FSMContext):
             await callback.message.delete()  # Удаляем сообщение рейтинга
             await callback.message.answer_photo(
                 photo,
-                caption=get_profile_text(user, player_stats, user_statistics),
+                caption=get_profile_text(user, player_stats, user_statistics, db),
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
@@ -2727,7 +2745,7 @@ async def handle_back_to_profile(callback: CallbackQuery, state: FSMContext):
             logger.error(f"Ошибка отправки фото профиля: {e}")
             # Если не удалось отправить фото, отправляем текстовую версию
             await callback.message.edit_text(
-                get_profile_text(user, player_stats, user_statistics),
+                get_profile_text(user, player_stats, user_statistics, db),
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
@@ -2849,7 +2867,7 @@ async def handle_profile_callback(callback: CallbackQuery, state: FSMContext):
     rank_info = await db.get_user_rank_info(user_id)
 
     # Формируем текст профиля
-    profile_text = get_profile_text(user, player_stats, user_statistics)
+    profile_text = get_profile_text(user, player_stats, user_statistics, db)
 
     # Создаем клавиатуру профиля
     keyboard = InlineKeyboardMarkup(inline_keyboard=[

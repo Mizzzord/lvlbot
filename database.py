@@ -19,8 +19,8 @@ class Database:
         if self.use_postgres:
             # Проверяем конфигурацию PostgreSQL только если используется PostgreSQL
             try:
-            validate_postgres_config()
-            logger.info("Используется PostgreSQL база данных")
+                validate_postgres_config()
+                logger.info("Используется PostgreSQL база данных")
             except Exception as e:
                 logger.error(f"Ошибка конфигурации PostgreSQL: {e}")
                 raise
@@ -932,25 +932,25 @@ class Database:
                     payment.subscription_level
                 ))
             else:
-            cursor = await db.execute('''
-                INSERT INTO payments (user_id, payment_id, order_id, amount, months, status, created_at, paid_at,
-                                     currency, payment_method, discount_code, referral_used, subscription_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                payment.user_id,
-                payment.payment_id,
-                payment.order_id,
-                payment.amount,
-                payment.months,
-                payment.status.value,
-                payment.created_at,
-                payment.paid_at,
-                payment.currency,
-                payment.payment_method,
-                payment.discount_code,
-                payment.referral_used,
-                payment.subscription_type
-            ))
+                cursor = await db.execute('''
+                    INSERT INTO payments (user_id, payment_id, order_id, amount, months, status, created_at, paid_at,
+                                         currency, payment_method, discount_code, referral_used, subscription_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    payment.user_id,
+                    payment.payment_id,
+                    payment.order_id,
+                    payment.amount,
+                    payment.months,
+                    payment.status.value,
+                    payment.created_at,
+                    payment.paid_at,
+                    payment.currency,
+                    payment.payment_method,
+                    payment.discount_code,
+                    payment.referral_used,
+                    payment.subscription_type
+                ))
             payment_id = cursor.lastrowid
             await db.commit()
             logger.info(f"Платеж {payment.order_id} сохранен")
@@ -1070,21 +1070,21 @@ class Database:
                 ))
             else:
                 # Fallback для старых версий БД
-            cursor = await db.execute('''
-                INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
-                                          auto_renew, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                subscription.user_id,
-                subscription.payment_id,
-                subscription.start_date,
-                subscription.end_date,
-                subscription.months,
-                subscription.status.value,
-                subscription.auto_renew,
-                subscription.created_at,
-                subscription.updated_at
-            ))
+                cursor = await db.execute('''
+                    INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
+                                              auto_renew, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    subscription.user_id,
+                    subscription.payment_id,
+                    subscription.start_date,
+                    subscription.end_date,
+                    subscription.months,
+                    subscription.status.value,
+                    subscription.auto_renew,
+                    subscription.created_at,
+                    subscription.updated_at
+                ))
             subscription_id = cursor.lastrowid
             await db.commit()
             logger.info(f"Подписка {subscription_id} для пользователя {subscription.user_id} сохранена")
@@ -1516,6 +1516,29 @@ class Database:
             rows = await cursor.fetchall()
             return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
 
+    async def get_user_rating_position(self, user_id: int) -> int:
+        """Получение позиции пользователя в общем рейтинге (по уровню и опыту)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем статистику пользователя
+            user_stats = await self.get_user_stats(user_id)
+            if not user_stats:
+                return 0
+            
+            # Подсчитываем количество пользователей с лучшими показателями
+            cursor = await db.execute('''
+                SELECT COUNT(*) + 1 as position
+                FROM user_stats us
+                JOIN users u ON us.user_id = u.telegram_id
+                WHERE u.subscription_active = 1
+                AND (
+                    us.level > ? OR 
+                    (us.level = ? AND us.experience > ?)
+                )
+            ''', (user_stats.level, user_stats.level, user_stats.experience))
+            
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
     async def update_user_referral_rank(self, user_id: int):
         """Обновление рейтинга среди подписчиков блогера для пользователя"""
         # Получаем текущую статистику пользователя
@@ -1727,16 +1750,16 @@ class Database:
                 has_subscription_level = 'subscription_level' in columns
                 
                 if has_custom_condition and has_subscription_level:
-                cursor = await db.execute('''
+                    cursor = await db.execute('''
                         INSERT INTO prizes (prize_type, referral_code, title, description, achievement_type, achievement_value, custom_condition, subscription_level, emoji, is_active, created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    prize.prize_type.value,
-                    prize.referral_code,
-                    prize.title,
-                    prize.description,
-                    prize.achievement_type,
-                    prize.achievement_value,
+                    ''', (
+                        prize.prize_type.value,
+                        prize.referral_code,
+                        prize.title,
+                        prize.description,
+                        prize.achievement_type,
+                        prize.achievement_value,
                         prize.custom_condition,
                         prize.subscription_level,
                         prize.emoji,
@@ -1762,11 +1785,11 @@ class Database:
                         prize.achievement_value,
                         prize.custom_condition,
                         prize.subscription_level,
-                    prize.emoji,
-                    prize.is_active,
-                    prize.created_at,
-                    prize.updated_at
-                ))
+                        prize.emoji,
+                        prize.is_active,
+                        prize.created_at,
+                        prize.updated_at
+                    ))
                 prize.id = cursor.lastrowid
             else:
                 # Обновление существующего приза
