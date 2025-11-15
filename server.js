@@ -83,7 +83,7 @@ setInterval(cleanupTempFiles, 60 * 60 * 1000);
  */
 app.post('/generate-card', async (req, res) => {
     try {
-        const { photoPath, nickname, experience, level, rank, ratingPosition, stats } = req.body;
+        const { photoPath, nickname, experience, level, rank, ratingPosition, stats, daysStreak } = req.body;
 
         // Валидация входных данных
         if (!nickname || typeof experience !== 'number' || !stats) {
@@ -103,7 +103,8 @@ app.post('/generate-card', async (req, res) => {
             level || 1, 
             rank || 'F', 
             ratingPosition || 0, 
-            stats
+            stats,
+            daysStreak || 0
         );
 
         // Устанавливаем заголовки для ответа

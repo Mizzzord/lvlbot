@@ -2,6 +2,7 @@ import os
 import psycopg2
 import psycopg2.extras
 import logging
+import urllib.request
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
@@ -9,15 +10,17 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# PostgreSQL Configuration
+# PostgreSQL Configuration согласно документации Timeweb
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "ce577c3306225bd06a426f70.twc1.net")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")  # Порт по умолчанию для PostgreSQL
 POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "Go_prime")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "Go_prime_main")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 POSTGRES_SSL_MODE = os.getenv("POSTGRES_SSL_MODE", "verify-full")
-# Используем значение из env или путь по умолчанию
+# Используем значение из env или путь по умолчанию согласно документации Timeweb
 POSTGRES_SSL_ROOT_CERT = os.getenv("POSTGRES_SSL_ROOT_CERT", "~/.cloud-certs/root.crt")
+# URL для скачивания сертификата Timeweb
+TIMEWEB_CERT_URL = "https://st.timeweb.com/cloud-static/ca.crt"
 
 # Преобразуем порт в int, если он указан
 try:
@@ -26,8 +29,56 @@ except ValueError:
     POSTGRES_PORT = 5432
     logger.warning(f"Неверный формат порта PostgreSQL: {os.getenv('POSTGRES_PORT')}. Используется порт по умолчанию 5432")
 
+def ensure_ssl_certificate():
+    """
+    Убеждается что SSL сертификат Timeweb установлен.
+    Если сертификат отсутствует, скачивает его автоматически.
+    Согласно документации Timeweb: https://st.timeweb.com/cloud-static/ca.crt
+    """
+    expanded_cert_path = os.path.expanduser(POSTGRES_SSL_ROOT_CERT)
+    cert_dir = os.path.dirname(expanded_cert_path)
+    
+    # Создаем директорию если её нет
+    if not os.path.exists(cert_dir):
+        try:
+            os.makedirs(cert_dir, mode=0o700)
+            logger.info(f"Создана директория для SSL сертификатов: {cert_dir}")
+        except OSError as e:
+            logger.error(f"Не удалось создать директорию {cert_dir}: {e}")
+            return False
+    
+    # Проверяем существует ли сертификат
+    if os.path.exists(expanded_cert_path):
+        logger.debug(f"SSL сертификат найден: {expanded_cert_path}")
+        return True
+    
+    # Скачиваем сертификат если его нет
+    try:
+        logger.info(f"Скачивание SSL сертификата Timeweb из {TIMEWEB_CERT_URL}...")
+        urllib.request.urlretrieve(TIMEWEB_CERT_URL, expanded_cert_path)
+        
+        # Устанавливаем правильные права доступа (только для владельца)
+        os.chmod(expanded_cert_path, 0o600)
+        
+        logger.info(f"✅ SSL сертификат успешно установлен: {expanded_cert_path}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось скачать SSL сертификат: {e}")
+        logger.error(f"Попробуйте скачать вручную:")
+        logger.error(f"  mkdir -p {cert_dir}")
+        logger.error(f"  curl -o {expanded_cert_path} {TIMEWEB_CERT_URL}")
+        logger.error(f"  chmod 0600 {expanded_cert_path}")
+        return False
+
 def get_postgres_connection():
-    """Создание подключения к PostgreSQL"""
+    """
+    Создание подключения к PostgreSQL через psycopg2.
+    Согласно документации Timeweb использует SSL с сертификатом.
+    """
+    # Убеждаемся что сертификат установлен (для verify-full режима)
+    if POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
+        ensure_ssl_certificate()
+    
     conn_params = {
         "host": POSTGRES_HOST,
         "port": POSTGRES_PORT,
@@ -42,11 +93,20 @@ def get_postgres_connection():
         expanded_cert_path = os.path.expanduser(POSTGRES_SSL_ROOT_CERT)
         if os.path.exists(expanded_cert_path):
             conn_params["sslrootcert"] = expanded_cert_path
+            logger.debug(f"Используется SSL сертификат: {expanded_cert_path}")
+        elif POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
+            logger.warning(f"⚠️ SSL сертификат не найден: {expanded_cert_path}")
+            logger.warning("Подключение может не работать. Попробуйте установить сертификат вручную.")
     
     return psycopg2.connect(**conn_params)
 
 def get_postgres_connection_string():
-    """Получение строки подключения для asyncpg"""
+    """
+    Получение строки подключения для asyncpg.
+    ВАЖНО: asyncpg не поддерживает sslmode в URL строке так же как psycopg2.
+    Для asyncpg нужно использовать параметр ssl в словаре параметров через get_postgres_connection_params().
+    Эта функция используется только для совместимости, рекомендуется использовать get_postgres_connection_params().
+    """
     # URL-кодируем пароль и другие параметры для безопасной передачи в URL
     encoded_user = quote_plus(POSTGRES_USER)
     encoded_password = quote_plus(POSTGRES_PASSWORD)
@@ -54,20 +114,17 @@ def get_postgres_connection_string():
     encoded_database = quote_plus(POSTGRES_DATABASE)
     
     # Формируем базовую строку подключения с портом
-    # ВАЖНО: asyncpg не поддерживает sslmode в URL строке так же как psycopg2
-    # Для asyncpg нужно использовать параметр ssl в словаре параметров
-    # Поэтому в строке подключения мы не добавляем sslmode
+    # SSL параметры обрабатываются через get_postgres_connection_params()
     conn_string = f"postgresql://{encoded_user}:{encoded_password}@{encoded_host}:{POSTGRES_PORT}/{encoded_database}"
-    
-    # Для asyncpg лучше не добавлять ssl параметры в URL, они обрабатываются через параметры
-    # Но если нужно, можно добавить только для простых случаев
-    # Для Timeweb обычно используется sslmode=disable или sslmode=require
     
     return conn_string
 
 def get_postgres_connection_params():
-    """Получение параметров подключения для asyncpg (основной способ)"""
-    """Возвращает словарь параметров для asyncpg.connect()"""
+    """
+    Получение параметров подключения для asyncpg (основной способ).
+    Возвращает словарь параметров для asyncpg.connect().
+    Согласно документации Timeweb использует SSL с сертификатом для безопасного подключения.
+    """
     import ssl
     
     # Проверяем что пароль не пустой
@@ -87,18 +144,24 @@ def get_postgres_connection_params():
     logger.info(f"Подключение к PostgreSQL: host={POSTGRES_HOST}, port={POSTGRES_PORT}, database={POSTGRES_DATABASE}, user={POSTGRES_USER}, ssl_mode={POSTGRES_SSL_MODE}")
     logger.debug(f"Длина пароля: {len(POSTGRES_PASSWORD)} символов")
     
+    # Убеждаемся что сертификат установлен (для verify-full режима)
+    if POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
+        ensure_ssl_certificate()
+    
     # Добавляем SSL параметры для asyncpg
     # asyncpg требует объект SSLContext или специальные значения
-    # Для Timeweb обычно используется sslmode=disable или sslmode=require
+    # Согласно документации Timeweb рекомендуется использовать verify-full с сертификатом
     if POSTGRES_SSL_MODE:
         ssl_mode_lower = POSTGRES_SSL_MODE.lower()
         
         if ssl_mode_lower == "disable":
-            # Отключаем SSL
+            # Отключаем SSL (не рекомендуется для Timeweb)
             params["ssl"] = False
+            logger.warning("⚠️ SSL отключен. Для Timeweb рекомендуется использовать verify-full или require.")
         elif ssl_mode_lower == "require":
             # Требуем SSL без проверки сертификата
             params["ssl"] = "require"
+            logger.info("Используется SSL режим: require (без проверки сертификата)")
         elif ssl_mode_lower == "prefer":
             # Предпочитаем SSL, но не требуем
             params["ssl"] = "prefer"
@@ -106,46 +169,79 @@ def get_postgres_connection_params():
             # Разрешаем SSL
             params["ssl"] = "allow"
         elif ssl_mode_lower in ("verify-ca", "verify-full"):
-            # Требуем SSL с проверкой сертификата
+            # Требуем SSL с проверкой сертификата (рекомендуется для Timeweb)
             ssl_context = ssl.create_default_context()
             if POSTGRES_SSL_ROOT_CERT and POSTGRES_SSL_ROOT_CERT.strip():
                 expanded_cert_path = os.path.expanduser(POSTGRES_SSL_ROOT_CERT)
                 if os.path.exists(expanded_cert_path):
-                    ssl_context.load_verify_locations(expanded_cert_path)
+                    try:
+                        ssl_context.load_verify_locations(expanded_cert_path)
+                        logger.info(f"✅ SSL сертификат загружен: {expanded_cert_path}")
+                        params["ssl"] = ssl_context
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка загрузки SSL сертификата: {e}")
+                        logger.warning("Используется режим 'require' вместо 'verify-full'")
+                        params["ssl"] = "require"
                 else:
                     # Если файл сертификата не найден, используем require вместо verify
-                    logger.warning(f"Файл сертификата не найден: {expanded_cert_path}. Используется режим 'require'")
+                    logger.warning(f"⚠️ Файл сертификата не найден: {expanded_cert_path}")
+                    logger.warning("Используется режим 'require' вместо 'verify-full'")
+                    logger.info("Попробуйте установить сертификат вручную:")
+                    logger.info(f"  mkdir -p {os.path.dirname(expanded_cert_path)}")
+                    logger.info(f"  curl -o {expanded_cert_path} {TIMEWEB_CERT_URL}")
+                    logger.info(f"  chmod 0600 {expanded_cert_path}")
                     params["ssl"] = "require"
-                    return params
-            params["ssl"] = ssl_context
+            else:
+                logger.warning("Путь к SSL сертификату не указан. Используется режим 'require'")
+                params["ssl"] = "require"
         else:
             # Неизвестный режим SSL - используем require по умолчанию
-            logger.warning(f"Неизвестный режим SSL: {POSTGRES_SSL_MODE}. Используется режим 'require'")
+            logger.warning(f"⚠️ Неизвестный режим SSL: {POSTGRES_SSL_MODE}. Используется режим 'require'")
             params["ssl"] = "require"
     
     return params
 
 # Проверка конфигурации
 def validate_postgres_config():
-    """Проверка наличия всех необходимых переменных окружения"""
+    """
+    Проверка наличия всех необходимых переменных окружения.
+    Согласно документации Timeweb проверяет наличие обязательных параметров.
+    """
     required_vars = ["POSTGRES_HOST", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"]
     missing_vars = []
 
     for var in required_vars:
-        if not os.getenv(var):
+        env_value = os.getenv(var)
+        # Проверяем что переменная установлена и не пустая
+        if not env_value or env_value.strip() == "":
             missing_vars.append(var)
 
     if missing_vars:
-        raise ValueError(f"Отсутствуют обязательные переменные окружения: {', '.join(missing_vars)}")
+        error_msg = f"Отсутствуют обязательные переменные окружения: {', '.join(missing_vars)}"
+        logger.error(f"❌ {error_msg}")
+        logger.error("Проверьте файл .env и убедитесь что все переменные установлены.")
+        raise ValueError(error_msg)
 
-    # Проверка существования файла сертификата (только если SSL режим требует сертификат и путь указан)
+    # Проверка и установка SSL сертификата (только если SSL режим требует сертификат)
     if POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
         cert_path = POSTGRES_SSL_ROOT_CERT
-        if cert_path and cert_path.strip():  # Проверяем только если путь указан и не пустой
+        if cert_path and cert_path.strip():
             expanded_cert_path = os.path.expanduser(cert_path)
             if not os.path.exists(expanded_cert_path):
-                raise FileNotFoundError(f"Файл сертификата не найден: {expanded_cert_path}")
+                logger.warning(f"⚠️ Файл сертификата не найден: {expanded_cert_path}")
+                logger.info("Попытка автоматической установки сертификата...")
+                if not ensure_ssl_certificate():
+                    logger.error("❌ Не удалось установить SSL сертификат автоматически.")
+                    logger.error("Установите сертификат вручную:")
+                    logger.error(f"  mkdir -p {os.path.dirname(expanded_cert_path)}")
+                    logger.error(f"  curl -o {expanded_cert_path} {TIMEWEB_CERT_URL}")
+                    logger.error(f"  chmod 0600 {expanded_cert_path}")
+                    raise FileNotFoundError(
+                        f"Файл сертификата не найден: {expanded_cert_path}. "
+                        f"Скачайте его из {TIMEWEB_CERT_URL}"
+                    )
 
+    logger.info("✅ Конфигурация PostgreSQL валидна")
     return True
 
 if __name__ == "__main__":

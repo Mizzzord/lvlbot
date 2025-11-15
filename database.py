@@ -456,16 +456,24 @@ class Database:
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS prizes (
                     id SERIAL PRIMARY KEY,
-                    prize_type TEXT,
-                    title TEXT,
-                    description TEXT,
+                    prize_type TEXT NOT NULL,
                     referral_code TEXT,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    achievement_type TEXT NOT NULL,
+                    achievement_value INTEGER NOT NULL,
+                    custom_condition TEXT,
+                    subscription_level INTEGER,
+                    emoji TEXT DEFAULT '🎁',
                     is_active BOOLEAN DEFAULT TRUE,
                     created_by BIGINT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # Добавляем недостающие колонки в таблицу prizes (миграция для существующих баз)
+            await self._add_missing_prizes_columns_postgres(conn)
 
             # Инициализируем стандартные призы
             await self._init_default_prizes_postgres(conn)
@@ -511,8 +519,9 @@ class Database:
 
     async def _init_default_prizes_postgres(self, conn):
         """Инициализация стандартных призов для PostgreSQL"""
-        import time
-        current_time = int(time.time())
+        from datetime import datetime
+        # PostgreSQL использует TIMESTAMP, поэтому нужен datetime объект, а не Unix timestamp
+        current_time = datetime.now()
 
         # Проверяем, есть ли уже призы
         count = await conn.fetchval('SELECT COUNT(*) FROM prizes')
@@ -637,6 +646,39 @@ class Database:
                 prize['created_at'],
                 prize['updated_at']
             )
+
+    async def _add_missing_prizes_columns_postgres(self, conn):
+        """Добавляет недостающие колонки в таблицу prizes для PostgreSQL"""
+        # Список колонок которые должны быть в таблице prizes
+        # Для существующих таблиц сначала добавляем с DEFAULT, потом можно убрать DEFAULT если нужно
+        prizes_columns = [
+            ('achievement_type', 'TEXT', "DEFAULT 'streak'", True),  # NOT NULL с DEFAULT
+            ('achievement_value', 'INTEGER', 'DEFAULT 0', True),  # NOT NULL с DEFAULT
+            ('custom_condition', 'TEXT', '', False),
+            ('subscription_level', 'INTEGER', '', False),
+            ('emoji', 'TEXT', "DEFAULT '🎁'", False),
+        ]
+
+        for column_name, column_type, default_value, is_not_null in prizes_columns:
+            try:
+                # Проверяем существует ли колонка
+                check_query = '''
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='prizes' AND column_name=$1
+                '''
+                column_exists = await conn.fetchval(check_query, column_name)
+                
+                if not column_exists:
+                    # Если колонка не существует, добавляем её
+                    not_null_clause = 'NOT NULL' if is_not_null else ''
+                    default_clause = f' {default_value}' if default_value else ''
+                    alter_query = f'ALTER TABLE prizes ADD COLUMN {column_name} {column_type} {not_null_clause} {default_clause}'
+                    await conn.execute(alter_query)
+                    logger.info(f"✅ Колонка {column_name} добавлена в таблицу prizes (PostgreSQL)")
+            except Exception as e:
+                # Колонка уже существует или другая ошибка
+                logger.debug(f"Колонка {column_name} уже существует или ошибка: {e}")
 
     async def _add_missing_columns(self, db):
         """Добавляет недостающие колонки для совместимости с существующими базами данных"""
@@ -1302,6 +1344,18 @@ class Database:
         if self.use_postgres:
             conn = await _get_postgres_connection()
             try:
+                # Конвертируем timestamp в datetime для PostgreSQL
+                created_at = stats.created_at
+                updated_at = stats.updated_at
+                if isinstance(created_at, int):
+                    created_at = datetime.datetime.fromtimestamp(created_at)
+                elif created_at is None:
+                    created_at = datetime.datetime.now()
+                if isinstance(updated_at, int):
+                    updated_at = datetime.datetime.fromtimestamp(updated_at)
+                elif updated_at is None:
+                    updated_at = datetime.datetime.now()
+                
                 row = await conn.fetchrow('''
                     INSERT INTO player_stats (user_id, nickname, experience, strength, agility, endurance, intelligence, charisma, photo_path, card_image_path, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -1328,8 +1382,8 @@ class Database:
                     stats.charisma,
                     stats.photo_path,
                     stats.card_image_path,
-                    stats.created_at,
-                    stats.updated_at
+                    created_at,
+                    updated_at
                 ))
                 stats_id = row['id'] if row else (stats.id if stats.id else None)
                 logger.info(f"PlayerStats сохранены в PostgreSQL для user_id={stats.user_id}, id={stats_id}")

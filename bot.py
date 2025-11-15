@@ -5,7 +5,6 @@ import aiosqlite
 import datetime
 import os
 from datetime import date
-from PIL import Image, ImageDraw, ImageFont
 import textwrap
 from typing import Optional
 
@@ -380,9 +379,9 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
         logger.error(f"Error analyzing player photo: {e}")
         return {'strength': 50, 'agility': 50, 'endurance': 50}
 
-async def create_player_card_image_nodejs(photo_path: str, nickname: str, experience: int, level: int, rank: str, rating_position: int, stats: dict) -> str:
+async def create_player_card_image_nodejs(photo_path: str, nickname: str, experience: int, level: int, rank: str, rating_position: int, stats: dict, days_streak: int = 0) -> str:
     """
-    Создает изображение карточки игрока с помощью Node.js сервиса
+    Создает изображение карточки игрока с помощью Node.js сервиса в новом дизайне
 
     Args:
         photo_path: путь к фото пользователя
@@ -392,6 +391,7 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
         rank: ранг игрока
         rating_position: позиция в общем рейтинге
         stats: словарь с характеристиками
+        days_streak: количество дней подряд (current_streak)
 
     Returns:
         str: путь к созданному изображению карточки
@@ -406,7 +406,8 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
                 "level": level,
                 "rank": rank,
                 "ratingPosition": rating_position,
-                "stats": stats
+                "stats": stats,
+                "daysStreak": days_streak
             }
 
             async with session.post(
@@ -458,179 +459,7 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
         raise e
 
 
-async def create_player_card_image(photo_path: str, nickname: str, experience: int, stats: dict) -> str:
-    """
-    Создает изображение карточки игрока
-
-    Args:
-        photo_path: путь к фото пользователя
-        nickname: ник игрока
-        experience: опыт игрока
-        stats: словарь с характеристиками
-
-    Returns:
-        str: путь к созданному изображению карточки
-    """
-    try:
-        # Размеры карточки
-        card_width = 800
-        card_height = 1200
-
-        # Создаем новое изображение
-        card = Image.new('RGB', (card_width, card_height), (30, 30, 46))  # Темно-синий фон
-        draw = ImageDraw.Draw(card)
-
-        # Загружаем фото пользователя
-        try:
-            user_photo = Image.open(photo_path)
-            # Изменяем размер фото под аватар (круглый)
-            avatar_size = 200
-            user_photo = user_photo.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-
-            # Создаем маску для круглого аватара
-            mask = Image.new('L', (avatar_size, avatar_size), 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
-
-            # Создаем круглый аватар
-            avatar = Image.new('RGBA', (avatar_size, avatar_size), (0, 0, 0, 0))
-            avatar.paste(user_photo, (0, 0), mask)
-
-            # Добавляем аватар на карточку
-            avatar_x = (card_width - avatar_size) // 2
-            avatar_y = 50
-            card.paste(avatar, (avatar_x, avatar_y), avatar)
-
-        except Exception as e:
-            logger.warning(f"Не удалось загрузить фото пользователя: {e}")
-            # Создаем placeholder для аватара
-            avatar_x = (card_width - 200) // 2
-            avatar_y = 50
-            draw.rectangle([avatar_x, avatar_y, avatar_x + 200, avatar_y + 200],
-                         fill=(100, 100, 100), outline=(255, 255, 255), width=3)
-
-        # Цвета для дизайна
-        primary_color = (147, 112, 219)  # Medium Purple
-        secondary_color = (255, 215, 0)  # Gold
-        text_color = (255, 255, 255)     # White
-        stat_color = (176, 196, 222)     # Light Steel Blue
-
-        # Заголовок "ИГРОВАЯ КАРТОЧКА"
-        title_font_size = 48
-        try:
-            title_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", title_font_size)
-        except:
-            title_font = ImageFont.load_default()
-
-        title_text = "ИГРОВАЯ КАРТОЧКА"
-        title_bbox = draw.textbbox((0, 0), title_text, font=title_font)
-        title_width = title_bbox[2] - title_bbox[0]
-        title_x = (card_width - title_width) // 2
-        title_y = 280
-
-        # Градиентная рамка для заголовка
-        draw.rectangle([title_x - 20, title_y - 10, title_x + title_width + 20, title_y + title_font_size + 10],
-                     fill=primary_color, outline=secondary_color, width=3)
-        draw.text((title_x, title_y), title_text, font=title_font, fill=text_color)
-
-        # Ник игрока
-        nick_font_size = 36
-        try:
-            nick_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", nick_font_size)
-        except:
-            nick_font = ImageFont.load_default()
-
-        nick_y = title_y + 80
-        draw.text((card_width // 2, nick_y), nickname, font=nick_font, fill=secondary_color, anchor="mm")
-
-        # Опыт
-        exp_font_size = 24
-        try:
-            exp_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", exp_font_size)
-        except:
-            exp_font = ImageFont.load_default()
-
-        exp_text = f"⭐ Опыт: {experience}"
-        exp_bbox = draw.textbbox((0, 0), exp_text, font=exp_font)
-        exp_width = exp_bbox[2] - exp_bbox[0]
-        exp_x = (card_width - exp_width) // 2
-        exp_y = nick_y + 50
-        draw.text((exp_x, exp_y), exp_text, font=exp_font, fill=text_color)
-
-        # Характеристики
-        stat_font_size = 28
-        try:
-            stat_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", stat_font_size)
-        except:
-            stat_font = ImageFont.load_default()
-
-        stat_names = {
-            'strength': '💪 Сила',
-            'agility': '🤸 Ловкость',
-            'endurance': '🏃 Выносливость',
-            'intelligence': '🧠 Интеллект',
-            'charisma': '✨ Харизма'
-        }
-
-        start_y = exp_y + 80
-        bar_width = 300
-        bar_height = 25
-        spacing = 50
-
-        for i, (stat_key, stat_name) in enumerate(stat_names.items()):
-            stat_value = stats[stat_key]
-
-            # Название характеристики
-            stat_y = start_y + i * spacing
-            draw.text((150, stat_y), f"{stat_name}:", font=stat_font, fill=text_color, anchor="lm")
-
-            # Значение характеристики
-            value_text = f"{stat_value}/100"
-            draw.text((card_width - 150, stat_y), value_text, font=stat_font, fill=secondary_color, anchor="rm")
-
-            # Полоса прогресса
-            bar_x = 150
-            bar_y = stat_y + 30
-
-            # Фон полосы
-            draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height],
-                         fill=(50, 50, 50), outline=stat_color, width=2)
-
-            # Заполнение полосы
-            fill_width = int(bar_width * stat_value / 100)
-            if fill_width > 0:
-                color_intensity = min(255, int(100 + stat_value * 1.55))  # Более яркий цвет для высоких значений
-                fill_color = (color_intensity, 100, 255 - stat_value) if stat_value > 50 else (255 - stat_value * 2, color_intensity, 100)
-                draw.rectangle([bar_x + 2, bar_y + 2, bar_x + fill_width - 2, bar_y + bar_height - 2],
-                             fill=fill_color)
-
-        # Нижний декор
-        footer_y = card_height - 100
-        footer_text = "© Motivation Bot"
-        footer_font_size = 20
-        try:
-            footer_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", footer_font_size)
-        except:
-            footer_font = ImageFont.load_default()
-
-        footer_bbox = draw.textbbox((0, 0), footer_text, font=footer_font)
-        footer_width = footer_bbox[2] - footer_bbox[0]
-        footer_x = (card_width - footer_width) // 2
-        draw.text((footer_x, footer_y), footer_text, font=footer_font, fill=(150, 150, 150))
-
-        # Сохраняем карточку
-        cards_dir = "player_cards"
-        os.makedirs(cards_dir, exist_ok=True)
-
-        card_filename = f"{cards_dir}/card_{nickname}_{int(datetime.datetime.now().timestamp())}.png"
-        card.save(card_filename, 'PNG')
-
-        logger.info(f"Карточка игрока создана: {card_filename}")
-        return card_filename
-
-    except Exception as e:
-        logger.error(f"Ошибка создания карточки игрока: {e}")
-        return None
+# Старая функция create_player_card_image удалена - теперь используется только Node.js сервис с новым дизайном из Player Card Design
 
 def create_goal_confirmation_keyboard() -> InlineKeyboardMarkup:
     """Создание inline клавиатуры для подтверждения цели"""
@@ -1867,6 +1696,9 @@ async def process_player_photo(message: Message, state: FSMContext):
         
         # Получаем позицию в рейтинге
         rating_position = await db.get_user_rating_position(user_id)
+        
+        # Получаем current_streak для карточки
+        current_streak = user_stats.current_streak if user_stats else 0
 
         # Создаем изображение карточки игрока
         card_stats = {
@@ -1877,26 +1709,18 @@ async def process_player_photo(message: Message, state: FSMContext):
             'charisma': 50
         }
         logger.info(f"Создание карточки с характеристиками: {card_stats}")
-        try:
-            # Сначала пытаемся использовать Node.js сервис
-            card_image_path = await create_player_card_image_nodejs(
-                photo_path=photo_path,
-                nickname=nickname,
-                experience=experience,
-                level=level,
-                rank=rank,
-                rating_position=rating_position,
-                stats=card_stats
-            )
-        except Exception as e:
-            # Fallback на PIL если Node.js сервис недоступен
-            logger.warning(f"Используем PIL fallback: {e}")
-            card_image_path = await create_player_card_image(
-                photo_path=photo_path,
-                nickname=nickname,
-                experience=0,
-                stats=card_stats
-            )
+        
+        # Используем Node.js сервис для генерации карточки в новом дизайне
+        card_image_path = await create_player_card_image_nodejs(
+            photo_path=photo_path,
+            nickname=nickname,
+            experience=experience,
+            level=level,
+            rank=rank,
+            rating_position=rating_position,
+            stats=card_stats,
+            days_streak=current_streak
+        )
 
         if is_photo_change:
             # Это замена фото - обновляем существующую запись
