@@ -5,16 +5,7 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     NODE_ENV=production
 
-# Устанавливаем Node.js v22.17.0
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    xz-utils \
-    && curl -fsSL https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-x64.tar.xz -o /tmp/node.tar.xz \
-    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
-    && rm -f /tmp/node.tar.xz \
-    && rm -rf /var/lib/apt/lists/* \
-    && node --version \
-    && npm --version
+
 
 # Рабочая директория
 WORKDIR /app
