@@ -12,7 +12,11 @@ if ! command -v node &> /dev/null; then
 fi
 
 # Проверка наличия Python
-if ! command -v python &> /dev/null && ! command -v python3 &> /dev/null; then
+if command -v python3 &> /dev/null; then
+    PYTHON_CMD=python3
+elif command -v python &> /dev/null; then
+    PYTHON_CMD=python
+else
     echo "❌ Python не установлен. Установите Python и попробуйте снова."
     exit 1
 fi
@@ -51,9 +55,15 @@ else
     if [ -f "requirements.txt" ]; then
         echo "📦 Проверка Python зависимостей..."
         # Простая проверка наличия основных пакетов
-        if ! python3 -c "import aiogram" 2>/dev/null; then
+        if ! $PYTHON_CMD -c "import aiogram" 2>/dev/null; then
             echo "📦 Установка Python зависимостей..."
-            pip3 install -r requirements.txt
+            if command -v pip3 &> /dev/null; then
+                pip3 install -r requirements.txt
+            elif command -v pip &> /dev/null; then
+                pip install -r requirements.txt
+            else
+                echo "⚠️ pip не найден, пропускаем установку Python зависимостей"
+            fi
         else
             echo "✅ Python зависимости уже установлены"
         fi
@@ -76,12 +86,12 @@ fi
 sleep 3
 
 echo "🤖 Запуск основного бота..."
-python bot.py &
+$PYTHON_CMD bot.py &
 BOT_PID=$!
 echo "🎯 Основной бот запущен (PID: $BOT_PID)"
 
 echo "👑 Запуск модераторского бота..."
-python moderator_bot.py &
+$PYTHON_CMD moderator_bot.py &
 MODERATOR_PID=$!
 echo "⚔️ Модераторский бот запущен (PID: $MODERATOR_PID)"
 

@@ -3,7 +3,8 @@ FROM python:3.12-slim
 
 # Устанавливаем переменные окружения
 ENV PYTHONUNBUFFERED=1 \
-    NODE_ENV=production
+    NODE_ENV=production \
+    DOCKER_CONTAINER=true
 
 # Устанавливаем Node.js v22.17.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
