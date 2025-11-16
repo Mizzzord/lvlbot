@@ -311,7 +311,18 @@ async def analyze_player_photo(photo_bytes: bytes) -> dict:
                     # Парсим JSON из ответа
                     try:
                         import json
-                        stats = json.loads(result_text)
+                        import re
+                        
+                        # Очищаем ответ от markdown разметки (```json ... ``` или ``` ... ```)
+                        cleaned_text = result_text.strip()
+                        # Удаляем markdown код блоки в начале и конце
+                        # Удаляем ```json или ``` в начале строки
+                        cleaned_text = re.sub(r'^```(?:json)?\s*', '', cleaned_text, flags=re.MULTILINE)
+                        # Удаляем ``` в конце строки
+                        cleaned_text = re.sub(r'```\s*$', '', cleaned_text, flags=re.MULTILINE)
+                        cleaned_text = cleaned_text.strip()
+                        
+                        stats = json.loads(cleaned_text)
                         logger.info(f"ИИ вернул характеристики: {stats}")
 
                         # Валидируем и нормализуем значения
@@ -356,7 +367,8 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
     """
     try:
         # Отправляем запрос к Node.js сервису
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        # Увеличенный таймаут для генерации больших изображений
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60, connect=10)) as session:
             payload = {
                 "photoPath": photo_path,
                 "nickname": nickname,
@@ -381,14 +393,15 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
                     logger.info(f"Получено {len(image_data)} байт от Node.js сервиса")
 
                     # Проверяем, что это действительно изображение (начинается с PNG сигнатуры)
-                    if not image_data.startswith(b'\x89PNG'):
-                        logger.error(f"Полученные данные не являются PNG изображением. Первые байты: {image_data[:50].hex()}")
+                    if not image_data or not image_data.startswith(b'\x89PNG'):
+                        logger.error(f"Полученные данные не являются PNG изображением. Размер: {len(image_data) if image_data else 0} байт")
                         # Попробуем распарсить как JSON с ошибкой
-                        try:
-                            error_json = image_data.decode('utf-8')
-                            logger.error(f"Ответ сервера (JSON): {error_json}")
-                        except:
-                            logger.error("Не удалось декодировать ответ сервера")
+                        if image_data:
+                            try:
+                                error_json = image_data.decode('utf-8')
+                                logger.error(f"Ответ сервера (JSON): {error_json}")
+                            except UnicodeDecodeError:
+                                logger.error(f"Первые байты ответа: {image_data[:100].hex()}")
                         raise Exception("Node.js service returned invalid image data")
 
                     # Проверяем Content-Type
@@ -416,112 +429,190 @@ async def create_player_card_image_nodejs(photo_path: str, nickname: str, experi
         raise e
 
 
-async def create_player_card_image(photo_path: str, nickname: str, experience: int, stats: dict) -> str:
+async def create_player_card_image(photo_path: str, nickname: str, experience: int, stats: dict, level: int = 1, rank: str = 'F', rating_position: int = None) -> str:
     """
-    Создает изображение карточки игрока
+    Создает изображение карточки игрока с фото как фоном
 
     Args:
-        photo_path: путь к фото пользователя
+        photo_path: путь к фото пользователя (используется как фон)
         nickname: ник игрока
         experience: опыт игрока
         stats: словарь с характеристиками
+        level: уровень игрока
+        rank: ранг игрока
+        rating_position: позиция в рейтинге (опционально)
 
     Returns:
         str: путь к созданному изображению карточки
     """
     try:
+        from PIL import ImageFilter
+        
         # Размеры карточки
         card_width = 800
         card_height = 1200
 
-        # Создаем новое изображение
-        card = Image.new('RGB', (card_width, card_height), (30, 30, 46))  # Темно-синий фон
-        draw = ImageDraw.Draw(card)
-
-        # Загружаем фото пользователя
+        # Загружаем фото пользователя и используем как фон
         try:
-            user_photo = Image.open(photo_path)
-            # Изменяем размер фото под аватар (круглый)
-            avatar_size = 200
-            user_photo = user_photo.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-
-            # Создаем маску для круглого аватара
-            mask = Image.new('L', (avatar_size, avatar_size), 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
-
-            # Создаем круглый аватар
-            avatar = Image.new('RGBA', (avatar_size, avatar_size), (0, 0, 0, 0))
-            avatar.paste(user_photo, (0, 0), mask)
-
-            # Добавляем аватар на карточку
-            avatar_x = (card_width - avatar_size) // 2
-            avatar_y = 50
-            card.paste(avatar, (avatar_x, avatar_y), avatar)
-
+            user_photo = Image.open(photo_path).convert('RGB')
+            # Изменяем размер фото под размер карточки с сохранением пропорций
+            photo_ratio = user_photo.width / user_photo.height
+            card_ratio = card_width / card_height
+            
+            if photo_ratio > card_ratio:
+                # Фото шире - обрезаем по ширине
+                new_height = card_height
+                new_width = int(new_height * photo_ratio)
+                user_photo = user_photo.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                # Обрезаем по центру
+                left = (new_width - card_width) // 2
+                user_photo = user_photo.crop((left, 0, left + card_width, new_height))
+            else:
+                # Фото выше - обрезаем по высоте
+                new_width = card_width
+                new_height = int(new_width / photo_ratio)
+                user_photo = user_photo.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                # Обрезаем по центру
+                top = (new_height - card_height) // 2
+                user_photo = user_photo.crop((0, top, new_width, top + card_height))
+            
+            # Применяем легкое размытие для фона
+            user_photo = user_photo.filter(ImageFilter.GaussianBlur(radius=2))
+            
+            # Создаем затемняющий слой для читаемости текста
+            # Затемняем изображение, уменьшая яркость
+            overlay = Image.new('RGB', (card_width, card_height), (0, 0, 0))
+            overlay_alpha = Image.new('L', (card_width, card_height), 70)  # 70 из 255 = ~27% прозрачности
+            
+            # Создаем карточку с фоном
+            card = Image.new('RGB', (card_width, card_height))
+            card.paste(user_photo, (0, 0))
+            
+            # Накладываем затемнение
+            darkened = Image.blend(card, overlay, 0.27)
+            card = darkened
+            
         except Exception as e:
             logger.warning(f"Не удалось загрузить фото пользователя: {e}")
-            # Создаем placeholder для аватара
-            avatar_x = (card_width - 200) // 2
-            avatar_y = 50
-            draw.rectangle([avatar_x, avatar_y, avatar_x + 200, avatar_y + 200],
-                         fill=(100, 100, 100), outline=(255, 255, 255), width=3)
+            # Создаем градиентный фон если фото недоступно
+            card = Image.new('RGB', (card_width, card_height), (30, 30, 46))
+            # Добавляем градиент
+            for y in range(card_height):
+                alpha = y / card_height
+                r = int(30 + (60 - 30) * alpha)
+                g = int(30 + (50 - 30) * alpha)
+                b = int(46 + (80 - 46) * alpha)
+                for x in range(card_width):
+                    card.putpixel((x, y), (r, g, b))
+
+        draw = ImageDraw.Draw(card)
 
         # Цвета для дизайна
         primary_color = (147, 112, 219)  # Medium Purple
         secondary_color = (255, 215, 0)  # Gold
+        accent_color = (255, 140, 0)     # Dark Orange
         text_color = (255, 255, 255)     # White
         stat_color = (176, 196, 222)     # Light Steel Blue
 
-        # Заголовок "ИГРОВАЯ КАРТОЧКА"
-        title_font_size = 48
+        # Загружаем шрифты
         try:
-            title_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", title_font_size)
+            title_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 52)
+            nick_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 42)
+            info_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 28)
+            stat_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 26)
+            value_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 24)
         except:
             title_font = ImageFont.load_default()
+            nick_font = ImageFont.load_default()
+            info_font = ImageFont.load_default()
+            stat_font = ImageFont.load_default()
+            value_font = ImageFont.load_default()
 
+        # Верхняя панель с градиентом
+        top_panel_height = 180
+        top_panel = Image.new('RGB', (card_width, top_panel_height), (0, 0, 0))
+        top_panel_alpha = Image.new('L', (card_width, top_panel_height), 200)  # 200 из 255 = ~78% непрозрачности
+        top_panel_rgba = Image.merge('RGBA', (*top_panel.split(), top_panel_alpha))
+        card_rgba = card.convert('RGBA')
+        card_rgba.paste(top_panel_rgba, (0, 0), top_panel_rgba)
+        card = card_rgba.convert('RGB')
+        draw = ImageDraw.Draw(card)  # Пересоздаем draw после изменения формата
+
+        # Заголовок "ИГРОВАЯ КАРТОЧКА"
         title_text = "ИГРОВАЯ КАРТОЧКА"
         title_bbox = draw.textbbox((0, 0), title_text, font=title_font)
         title_width = title_bbox[2] - title_bbox[0]
         title_x = (card_width - title_width) // 2
-        title_y = 280
+        title_y = 30
 
-        # Градиентная рамка для заголовка
-        draw.rectangle([title_x - 20, title_y - 10, title_x + title_width + 20, title_y + title_font_size + 10],
-                     fill=primary_color, outline=secondary_color, width=3)
-        draw.text((title_x, title_y), title_text, font=title_font, fill=text_color)
+        # Тень для заголовка
+        draw.text((title_x + 2, title_y + 2), title_text, font=title_font, fill=(0, 0, 0))
+        # Основной текст заголовка
+        draw.text((title_x, title_y), title_text, font=title_font, fill=secondary_color)
 
-        # Ник игрока
-        nick_font_size = 36
-        try:
-            nick_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", nick_font_size)
-        except:
-            nick_font = ImageFont.load_default()
+        # Ник игрока с эффектом свечения
+        nick_y = title_y + 70
+        nick_bbox = draw.textbbox((0, 0), nickname, font=nick_font)
+        nick_width = nick_bbox[2] - nick_bbox[0]
+        nick_x = (card_width - nick_width) // 2
+        
+        # Тень для ника
+        draw.text((nick_x + 2, nick_y + 2), nickname, font=nick_font, fill=(0, 0, 0))
+        # Основной текст ника
+        draw.text((nick_x, nick_y), nickname, font=nick_font, fill=text_color)
 
-        nick_y = title_y + 80
-        draw.text((card_width // 2, nick_y), nickname, font=nick_font, fill=secondary_color, anchor="mm")
+        # Информационная панель (уровень, ранг, опыт)
+        info_panel_y = top_panel_height + 20
+        info_panel_height = 120
+        info_panel = Image.new('RGB', (card_width - 80, info_panel_height), (0, 0, 0))
+        info_panel_alpha = Image.new('L', (card_width - 80, info_panel_height), 150)
+        info_panel_rgba = Image.merge('RGBA', (*info_panel.split(), info_panel_alpha))
+        card_rgba = card.convert('RGBA')
+        card_rgba.paste(info_panel_rgba, (40, info_panel_y), info_panel_rgba)
+        card = card_rgba.convert('RGB')
+        draw = ImageDraw.Draw(card)  # Пересоздаем draw после изменения формата
 
-        # Опыт
-        exp_font_size = 24
-        try:
-            exp_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", exp_font_size)
-        except:
-            exp_font = ImageFont.load_default()
+        # Уровень и ранг
+        level_text = f"📊 Уровень: {level}"
+        rank_text = f"🏅 Ранг: {rank}"
+        
+        draw.text((60, info_panel_y + 20), level_text, font=info_font, fill=text_color)
+        draw.text((60, info_panel_y + 60), rank_text, font=info_font, fill=secondary_color)
 
-        exp_text = f"⭐ Опыт: {experience}"
-        exp_bbox = draw.textbbox((0, 0), exp_text, font=exp_font)
+        # Опыт справа
+        exp_text = f"⭐ {experience} XP"
+        exp_bbox = draw.textbbox((0, 0), exp_text, font=info_font)
         exp_width = exp_bbox[2] - exp_bbox[0]
-        exp_x = (card_width - exp_width) // 2
-        exp_y = nick_y + 50
-        draw.text((exp_x, exp_y), exp_text, font=exp_font, fill=text_color)
+        exp_x = card_width - 60 - exp_width
+        draw.text((exp_x, info_panel_y + 40), exp_text, font=info_font, fill=accent_color)
+
+        # Позиция в рейтинге (если указана)
+        if rating_position:
+            rating_text = f"🏆 #{rating_position}"
+            rating_bbox = draw.textbbox((0, 0), rating_text, font=value_font)
+            rating_width = rating_bbox[2] - rating_bbox[0]
+            rating_x = card_width - 60 - rating_width
+            draw.text((rating_x, info_panel_y + 80), rating_text, font=value_font, fill=stat_color)
+
+        # Панель характеристик
+        stats_panel_y = info_panel_y + info_panel_height + 30
+        stats_panel_height = 550
+        stats_panel = Image.new('RGB', (card_width - 80, stats_panel_height), (0, 0, 0))
+        stats_panel_alpha = Image.new('L', (card_width - 80, stats_panel_height), 180)
+        stats_panel_rgba = Image.merge('RGBA', (*stats_panel.split(), stats_panel_alpha))
+        card_rgba = card.convert('RGBA')
+        card_rgba.paste(stats_panel_rgba, (40, stats_panel_y), stats_panel_rgba)
+        card = card_rgba.convert('RGB')
+        draw = ImageDraw.Draw(card)  # Пересоздаем draw после изменения формата
+
+        # Заголовок характеристик
+        stats_title = "ХАРАКТЕРИСТИКИ"
+        stats_title_bbox = draw.textbbox((0, 0), stats_title, font=info_font)
+        stats_title_width = stats_title_bbox[2] - stats_title_bbox[0]
+        stats_title_x = (card_width - stats_title_width) // 2
+        draw.text((stats_title_x, stats_panel_y + 20), stats_title, font=info_font, fill=secondary_color)
 
         # Характеристики
-        stat_font_size = 28
-        try:
-            stat_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", stat_font_size)
-        except:
-            stat_font = ImageFont.load_default()
-
         stat_names = {
             'strength': '💪 Сила',
             'agility': '🤸 Ловкость',
@@ -530,42 +621,53 @@ async def create_player_card_image(photo_path: str, nickname: str, experience: i
             'charisma': '✨ Харизма'
         }
 
-        start_y = exp_y + 80
-        bar_width = 300
-        bar_height = 25
-        spacing = 50
+        start_y = stats_panel_y + 70
+        bar_width = 500
+        bar_height = 30
+        spacing = 90
 
         for i, (stat_key, stat_name) in enumerate(stat_names.items()):
-            stat_value = stats[stat_key]
+            stat_value = stats.get(stat_key, 50)
 
             # Название характеристики
             stat_y = start_y + i * spacing
-            draw.text((150, stat_y), f"{stat_name}:", font=stat_font, fill=text_color, anchor="lm")
+            draw.text((60, stat_y), f"{stat_name}", font=stat_font, fill=text_color)
 
-            # Значение характеристики
+            # Значение характеристики справа
             value_text = f"{stat_value}/100"
-            draw.text((card_width - 150, stat_y), value_text, font=stat_font, fill=secondary_color, anchor="rm")
+            value_bbox = draw.textbbox((0, 0), value_text, font=value_font)
+            value_width = value_bbox[2] - value_bbox[0]
+            value_x = card_width - 60 - value_width
+            draw.text((value_x, stat_y + 2), value_text, font=value_font, fill=secondary_color)
 
             # Полоса прогресса
-            bar_x = 150
-            bar_y = stat_y + 30
+            bar_x = 60
+            bar_y = stat_y + 35
 
-            # Фон полосы
+            # Фон полосы с рамкой
             draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height],
-                         fill=(50, 50, 50), outline=stat_color, width=2)
+                         fill=(30, 30, 30), outline=stat_color, width=2)
 
-            # Заполнение полосы
+            # Заполнение полосы с градиентом
             fill_width = int(bar_width * stat_value / 100)
             if fill_width > 0:
-                color_intensity = min(255, int(100 + stat_value * 1.55))  # Более яркий цвет для высоких значений
-                fill_color = (color_intensity, 100, 255 - stat_value) if stat_value > 50 else (255 - stat_value * 2, color_intensity, 100)
-                draw.rectangle([bar_x + 2, bar_y + 2, bar_x + fill_width - 2, bar_y + bar_height - 2],
-                             fill=fill_color)
+                # Градиент для полосы прогресса
+                for x in range(bar_x + 2, bar_x + fill_width - 2):
+                    progress = (x - bar_x) / bar_width
+                    if stat_value > 50:
+                        r = int(100 + (155 * progress))
+                        g = int(100 + (115 * progress))
+                        b = int(255 - (155 * progress))
+                    else:
+                        r = int(255 - (155 * progress))
+                        g = int(100 + (155 * progress))
+                        b = int(100)
+                    draw.rectangle([x, bar_y + 2, x + 1, bar_y + bar_height - 2], fill=(r, g, b))
 
         # Нижний декор
-        footer_y = card_height - 100
+        footer_y = card_height - 60
         footer_text = "© Motivation Bot"
-        footer_font_size = 20
+        footer_font_size = 18
         try:
             footer_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", footer_font_size)
         except:
@@ -588,6 +690,8 @@ async def create_player_card_image(photo_path: str, nickname: str, experience: i
 
     except Exception as e:
         logger.error(f"Ошибка создания карточки игрока: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 def create_goal_confirmation_keyboard() -> InlineKeyboardMarkup:
@@ -1852,8 +1956,11 @@ async def process_player_photo(message: Message, state: FSMContext):
             card_image_path = await create_player_card_image(
                 photo_path=photo_path,
                 nickname=nickname,
-                experience=0,
-                stats=card_stats
+                experience=experience,
+                stats=card_stats,
+                level=level,
+                rank=rank,
+                rating_position=rating_position
             )
 
         if is_photo_change:

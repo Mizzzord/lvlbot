@@ -50,10 +50,12 @@ $null = Register-ObjectEvent -InputObject ([Console]::CancelKeyPress) -EventName
 if (-not $SkipDeps) {
     Write-Host "📦 Установка зависимостей..." -ForegroundColor Blue
 
-    # Установка Node.js зависимостей
-    if (Test-Path "package.json") {
-        Write-Host "📦 Установка Node.js зависимостей..." -ForegroundColor Blue
+    # Установка Node.js зависимостей для генератора карточек
+    if (Test-Path "Player Card Design\package.json") {
+        Write-Host "📦 Установка Node.js зависимостей для генератора карточек..." -ForegroundColor Blue
+        Push-Location "Player Card Design"
         npm install
+        Pop-Location
     }
 
     # Установка Python зависимостей
@@ -64,10 +66,17 @@ if (-not $SkipDeps) {
 }
 
 Write-Host "🎮 Запуск Node.js сервиса генерации карточек..." -ForegroundColor Blue
-$nodejsJob = Start-Job -ScriptBlock {
-    npm start
+if (Test-Path "Player Card Design") {
+    $nodejsJob = Start-Job -ScriptBlock {
+        Set-Location $using:PWD
+        Set-Location "Player Card Design"
+        npm start
+    }
+    Write-Host "📊 Node.js сервис запущен (Job ID: $($nodejsJob.Id))" -ForegroundColor Green
+} else {
+    Write-Host "⚠️ Папка 'Player Card Design' не найдена. Пропускаем запуск Node.js сервиса." -ForegroundColor Yellow
+    $nodejsJob = $null
 }
-Write-Host "📊 Node.js сервис запущен (Job ID: $($nodejsJob.Id))" -ForegroundColor Green
 
 # Ждем запуска Node.js сервиса
 Start-Sleep -Seconds 3

@@ -30,10 +30,12 @@ trap cleanup SIGINT SIGTERM
 
 echo "📦 Установка зависимостей..."
 
-# Установка Node.js зависимостей
-if [ -f "package.json" ]; then
-    echo "📦 Установка Node.js зависимостей..."
+# Установка Node.js зависимостей для генератора карточек
+if [ -d "Player Card Design" ] && [ -f "Player Card Design/package.json" ]; then
+    echo "📦 Установка Node.js зависимостей для генератора карточек..."
+    cd "Player Card Design"
     npm install
+    cd ..
 fi
 
 # Установка Python зависимостей
@@ -43,9 +45,16 @@ if [ -f "requirements.txt" ]; then
 fi
 
 echo "🎮 Запуск Node.js сервиса генерации карточек..."
-npm start &
-NODEJS_PID=$!
-echo "📊 Node.js сервис запущен (PID: $NODEJS_PID)"
+if [ -d "Player Card Design" ]; then
+    cd "Player Card Design"
+    npm start &
+    NODEJS_PID=$!
+    cd ..
+    echo "📊 Node.js сервис запущен (PID: $NODEJS_PID)"
+else
+    echo "⚠️ Папка 'Player Card Design' не найдена. Пропускаем запуск Node.js сервиса."
+    NODEJS_PID=""
+fi
 
 # Ждем запуска Node.js сервиса
 sleep 3
