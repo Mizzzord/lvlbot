@@ -3,75 +3,72 @@
 .gitignore
 .gitattributes
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+ENV/
+
 # Node.js
-node_modules
+node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .npm
 .eslintcache
 
-# Python
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-env
-pip-log.txt
-pip-delete-this-directory.txt
-.tox
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-.venv
-venv/
-ENV/
-env/
-*.egg-info/
-
 # IDE
-.vscode
-.idea
+.vscode/
+.idea/
 *.swp
 *.swo
-*.swn
-.DS_Store
+*~
 
 # OS
 .DS_Store
 Thumbs.db
-*.tmp
 
-# Project specific - НЕ игнорируем базу данных и медиа
-# Они нужны для начальной инициализации
-moderator_bot.log
+# Логи
 *.log
+*.log.*
 
-# Docker файлы - игнорируем
+# База данных (будет создана при запуске)
+bot_database.db
+*.db-journal
+
+# Временные файлы
+*.tmp
+*.temp
+.cache/
+
+# Docker
 Dockerfile*
 docker-compose*.yml
 .dockerignore
 
-# Documentation
-overview.md
-
-# Examples and docs
-example.env
-env.example
+# Документация
 *.md
-!requirements.txt
-!package.json
+!README.md
 
-# Testing
+# Скрипты запуска (копируются в контейнер)
+start-all.ps1
+
+# Тестовые данные
 test_*
-*.test.js
-*.test.py
+*_test.py
 
-# Temporary
-temp_uploads/
-.pytest_cache/
+# Изображения (будут созданы при работе)
+player_photos/*
+!player_photos/.gitkeep
+player_cards/*
+!player_cards/.gitkeep
+task_submissions/*
+!task_submissions/.gitkeep

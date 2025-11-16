@@ -2,13 +2,62 @@ version: "3.9"
 
 services:
   motivation-bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: motivation-bot
+    restart: unless-stopped
+    
+    # Переменные окружения из .env файла
+    env_file:
+      - .env
+    
+    # Переменные окружения (можно переопределить)
     environment:
+      - TZ=Europe/Moscow
+      - NODE_ENV=production
+      - PYTHONUNBUFFERED=1
       - PORT=3000
+    
+    # Порты
     ports:
       - "3000:3000"
+    
+    # Volumes для персистентности данных
     volumes:
-      - .:/app
-    command: bash ./start-all.sh  # запускаем через bash, чтобы избежать Permission denied
-    restart: unless-stopped
+      # База данных SQLite (если используется)
+      - ./bot_database.db:/app/bot_database.db
+      # Директории с пользовательскими данными
+      - ./player_photos:/app/player_photos
+      - ./player_cards:/app/player_cards
+      - ./task_submissions:/app/task_submissions
+      # Логи (опционально)
+      - ./logs:/app/logs
+    
+    # Ограничения ресурсов
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Команда запуска
+    command: bash ./start-all.sh
