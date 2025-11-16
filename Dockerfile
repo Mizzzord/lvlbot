@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DOCKER_CONTAINER=true
 
 # Устанавливаем системные зависимости и базовые инструменты
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     # Базовые инструменты
     curl \
     wget \
@@ -78,8 +78,9 @@ COPY requirements.txt .
 COPY ["Player Card Design/package.json", "Player Card Design/package-lock.json", "./Player Card Design/"]
 
 # Устанавливаем Python зависимости
-RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip3 install --no-cache-dir -r requirements.txt
+# Используем --break-system-packages, так как в Docker контейнере это безопасно
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade pip setuptools wheel && \
+    pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Устанавливаем Node.js зависимости для генератора карточек
 RUN cd "Player Card Design" && \
@@ -100,10 +101,10 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false \
     CHROME_BIN=/usr/bin/google-chrome-stable
 
 # Устанавливаем Google Chrome для Puppeteer (вместо Chromium для лучшей совместимости)
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
-    echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list && \
+RUN wget -q -O /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
     apt-get update && \
-    apt-get install -y google-chrome-stable && \
+    apt-get install -y --no-install-recommends /tmp/google-chrome-stable_current_amd64.deb && \
+    rm -f /tmp/google-chrome-stable_current_amd64.deb && \
     rm -rf /var/lib/apt/lists/* && \
     google-chrome-stable --version
 
