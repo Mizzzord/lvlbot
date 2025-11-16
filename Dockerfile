@@ -1,38 +1,9 @@
-# Простой Dockerfile для бота
-FROM ubuntu:24.04
+# Простой Dockerfile - используем образ с Python и Node.js
+FROM python:3.12-slim
 
 # Устанавливаем переменные окружения
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     NODE_ENV=production
-
-# Устанавливаем Python, Node.js и необходимые пакеты
-RUN apt-get update && apt-get install -y \
-    python3.12 \
-    python3-pip \
-    curl \
-    wget \
-    # Библиотеки для Puppeteer/Chrome
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2t64 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libatspi2.0-0 \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Создаем символические ссылки для python
-RUN ln -sf /usr/bin/python3.12 /usr/bin/python && \
-    ln -sf /usr/bin/python3.12 /usr/bin/python3
 
 # Рабочая директория
 WORKDIR /app
@@ -40,8 +11,8 @@ WORKDIR /app
 # Копируем файлы проекта
 COPY . .
 
-# Устанавливаем Python зависимости
-RUN pip3 install --break-system-packages -r requirements.txt
+# Устанавливаем Python зависимости из requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Устанавливаем Node.js зависимости
 RUN cd "Player Card Design" && npm install && cd ..
