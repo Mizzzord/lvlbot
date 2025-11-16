@@ -55,6 +55,7 @@ class UserRegistration(StatesGroup):
     waiting_for_player_photo = State()
     main_menu = State()
     changing_goal = State()
+    changing_goal_confirmation = State()
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -2908,22 +2909,45 @@ async def handle_profile_callback(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
     ])
 
-    # Если есть фото профиля, показываем его
-    if user.photo_file_id:
+    # Если есть карточка профиля, показываем её
+    if player_stats.card_image_path and os.path.exists(player_stats.card_image_path):
         try:
-            await callback.message.edit_caption(
-                caption=profile_text,
-                reply_markup=keyboard
-            )
+            # Проверяем, есть ли у текущего сообщения фото
+            if callback.message.photo:
+                # Если сообщение содержит фото, обновляем caption
+                await callback.message.edit_caption(
+                    caption=profile_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            else:
+                # Если сообщение не содержит фото, удаляем его и отправляем новое с фото
+                await callback.message.delete()
+                photo = FSInputFile(player_stats.card_image_path)
+                await callback.message.answer_photo(
+                    photo,
+                    caption=profile_text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
         except Exception as e:
             logger.error(f"Ошибка обновления фото профиля: {e}")
-            # Если не удалось обновить caption, отправляем новое сообщение
-            await callback.message.answer(
-                profile_text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
+            # Если не удалось обновить фото, отправляем текстовую версию
+            try:
+                await callback.message.edit_text(
+                    profile_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                # Если не удалось редактировать, отправляем новое сообщение
+                await callback.message.answer(
+                    profile_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
     else:
+        # Отправляем текстовую версию профиля
         await callback.message.edit_text(
             profile_text,
             reply_markup=keyboard,
@@ -2981,8 +3005,7 @@ async def handle_change_goal(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         "🎯 <b>Смена цели</b>\n\n"
-        "Расскажите о вашей новой цели:\n\n"
-        "<i>ИИ поможет сформулировать её правильно.</i>",
+        "Расскажите о вашей новой цели (минимум 3 символа):",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Отмена", callback_data="profile")]
@@ -3004,36 +3027,97 @@ async def process_goal_change(message: Message, state: FSMContext):
         )
         return
 
-    logger.info(f"Пользователь {user_id} меняет цель на: '{goal}'")
+    logger.info(f"Пользователь {user_id} ввел новую цель: '{goal}'")
 
-    # Улучшаем цель с помощью ИИ
-    await message.answer("🤖 Улучшаю формулировку вашей цели...")
-    improved_goal = await improve_goal_with_ai(goal)
+    # Сохраняем цель во временном состоянии
+    await state.update_data(goal=goal)
+    await state.set_state(UserRegistration.changing_goal_confirmation)
 
-    # Сохраняем новую цель в базу данных
-    user = await db.get_user(user_id)
-    if user:
-        # Обновляем цель пользователя
-        await db.update_user_field(user_id, 'goal', improved_goal)
-        logger.info(f"Цель пользователя {user_id} обновлена на: '{improved_goal}'")
+    await message.answer(
+        f"🎯 Ваша новая цель:\n\n<i>{goal}</i>\n\n"
+        f"Уверены ли вы в этой формулировке?",
+        reply_markup=create_goal_confirmation_keyboard()
+    )
 
-        await message.answer(
-            f"✅ <b>Цель успешно обновлена!</b>\n\n"
-            f"🎯 <b>Ваша новая цель:</b>\n"
-            f"<i>{improved_goal}</i>\n\n"
-            f"Теперь вы можете получать персонализированные задания по этой цели.",
-            parse_mode="HTML"
+@router.callback_query(UserRegistration.changing_goal_confirmation)
+async def process_goal_change_confirmation(callback: CallbackQuery, state: FSMContext):
+    """Обработка подтверждения смены цели"""
+    await callback.answer()
+    
+    action = callback.data
+    user_id = callback.from_user.id
+    logger.info(f"process_goal_change_confirmation: callback.from_user.id = {user_id}, action = {action}")
+
+    if action == "goal_confirm":
+        # Пользователь подтвердил цель - сохраняем её
+        data = await state.get_data()
+        goal = data.get('goal', '')
+        
+        logger.info(f"Пользователь {user_id} подтвердил новую цель: '{goal}'")
+        
+        # Сохраняем новую цель в базу данных
+        user = await db.get_user(user_id)
+        if user:
+            # Обновляем цель пользователя
+            await db.update_user_field(user_id, 'goal', goal)
+            logger.info(f"Цель пользователя {user_id} обновлена на: '{goal}'")
+
+            await callback.message.edit_text(
+                f"✅ <b>Цель успешно обновлена!</b>\n\n"
+                f"🎯 <b>Ваша новая цель:</b>\n"
+                f"<i>{goal}</i>\n\n"
+                f"Теперь вы можете получать персонализированные задания по этой цели.",
+                parse_mode="HTML"
+            )
+
+            # Очищаем состояние и возвращаемся в главное меню
+            await state.clear()
+            await show_main_menu(callback.message)
+        else:
+            logger.error(f"Пользователь {user_id} не найден при обновлении цели")
+            await callback.message.edit_text(
+                "❌ <b>Ошибка обновления цели</b>\n\n"
+                "Попробуйте позже или обратитесь в поддержку.",
+                parse_mode="HTML"
+            )
+
+    elif action == "goal_improve":
+        # Улучшаем цель с помощью ИИ
+        logger.info(f"Пользователь {user_id} выбрал улучшение цели ИИ при смене")
+        data = await state.get_data()
+        original_goal = data.get('goal', '')
+
+        # Отправляем сообщение о том, что ИИ работает
+        await callback.message.edit_text(
+            f"🎯 Ваша цель:\n\n<i>{original_goal}</i>\n\n"
+            f"🤖 Улучшаю формулировку с помощью ИИ...",
+            reply_markup=None
         )
 
-        # Очищаем состояние и возвращаемся в главное меню
-        await state.clear()
-        await show_main_menu(message)
-    else:
-        logger.error(f"Пользователь {user_id} не найден при обновлении цели")
-        await message.answer(
-            "❌ <b>Ошибка обновления цели</b>\n\n"
-            "Попробуйте позже или обратитесь в поддержку.",
-            parse_mode="HTML"
+        # Вызываем OpenRouter API
+        improved_goal = await improve_goal_with_ai(original_goal)
+        logger.info(f"Цель улучшена ИИ для пользователя {user_id}: '{original_goal}' -> '{improved_goal}'")
+
+        # Сохраняем улучшенную цель
+        await state.update_data(goal=improved_goal)
+
+        # Показываем улучшенную цель с той же клавиатурой
+        await callback.message.edit_text(
+            f"🎯 Улучшенная цель:\n\n<i>{improved_goal}</i>\n\n"
+            f"Теперь лучше звучит? Что скажете?",
+            reply_markup=create_goal_confirmation_keyboard()
+        )
+
+    elif action == "goal_edit":
+        # Возвращаемся к вводу цели
+        logger.info(f"Пользователь {user_id} выбрал редактирование цели при смене")
+        await state.set_state(UserRegistration.changing_goal)
+        await callback.message.edit_text(
+            "🎯 Хорошо, давайте переформулируем цель.\n\n"
+            "Расскажите о вашей новой цели:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Отмена", callback_data="profile")]
+            ])
         )
 
 @router.callback_query(lambda c: c.data == "stats")
