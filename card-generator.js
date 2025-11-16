@@ -156,8 +156,8 @@ async function createPlayerCardImage(photoPath, nickname, experience, level, ran
             return root && root.children.length > 0;
         }, { timeout: 5000 });
 
-        // Дополнительная задержка для полного рендеринга
-        await page.waitForTimeout(500);
+        // Дополнительная задержка для полного рендеринга (waitForTimeout удален в новых версиях Puppeteer)
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         // Делаем скриншот карточки
         const screenshot = await page.screenshot({

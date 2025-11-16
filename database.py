@@ -7,7 +7,7 @@ from datetime import date
 from typing import Optional
 from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
 from rank_config import get_rank_by_experience
-from postgres_config import get_postgres_connection_string, get_postgres_connection_params, validate_postgres_config
+from postgres_config import get_postgres_connection_params, validate_postgres_config
 
 logger = logging.getLogger(__name__)
 
@@ -340,9 +340,10 @@ class Database:
                     referral_code TEXT,
                     goal TEXT,
                     subscription_active BOOLEAN DEFAULT FALSE,
-                    subscription_start BIGINT,
-                    subscription_end BIGINT,
+                    subscription_start TIMESTAMP,
+                    subscription_end TIMESTAMP,
                     referral_count INTEGER DEFAULT 0,
+                    subscription_level INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -444,10 +445,14 @@ class Database:
                 CREATE TABLE IF NOT EXISTS daily_tasks (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
+                    task_description TEXT,
                     task TEXT,
-                    status TEXT DEFAULT 'active',
-                    created_at DATE DEFAULT CURRENT_DATE,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP,
                     completed_at TIMESTAMP,
+                    submitted_media_path TEXT,
+                    moderator_comment TEXT,
                     FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
                 )
             ''')
@@ -472,8 +477,42 @@ class Database:
                 )
             ''')
 
+            # Создаем таблицу модераторов
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS moderators (
+                    id SERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE NOT NULL,
+                    username TEXT,
+                    full_name TEXT,
+                    role TEXT DEFAULT 'moderator',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Создаем таблицу блогеров
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS bloggers (
+                    id SERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE NOT NULL,
+                    username TEXT,
+                    full_name TEXT,
+                    referral_code TEXT UNIQUE NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             # Добавляем недостающие колонки в таблицу prizes (миграция для существующих баз)
             await self._add_missing_prizes_columns_postgres(conn)
+            
+            # Добавляем недостающие колонки в таблицу daily_tasks (миграция для существующих баз)
+            await self._add_missing_daily_tasks_columns_postgres(conn)
+            
+            # Добавляем недостающие колонки в таблицу users (миграция для существующих баз)
+            await self._add_missing_users_columns_postgres(conn)
 
             # Инициализируем стандартные призы
             await self._init_default_prizes_postgres(conn)
@@ -676,6 +715,65 @@ class Database:
                     alter_query = f'ALTER TABLE prizes ADD COLUMN {column_name} {column_type} {not_null_clause} {default_clause}'
                     await conn.execute(alter_query)
                     logger.info(f"✅ Колонка {column_name} добавлена в таблицу prizes (PostgreSQL)")
+            except Exception as e:
+                # Колонка уже существует или другая ошибка
+                logger.debug(f"Колонка {column_name} уже существует или ошибка: {e}")
+
+    async def _add_missing_daily_tasks_columns_postgres(self, conn):
+        """Добавляет недостающие колонки в таблицу daily_tasks для PostgreSQL"""
+        # Список колонок которые должны быть в таблице daily_tasks
+        daily_tasks_columns = [
+            ('task_description', 'TEXT', '', False),
+            ('expires_at', 'TIMESTAMP', '', False),
+            ('submitted_media_path', 'TEXT', '', False),
+            ('moderator_comment', 'TEXT', '', False),
+        ]
+
+        for column_name, column_type, default_value, is_not_null in daily_tasks_columns:
+            try:
+                # Проверяем существует ли колонка
+                check_query = '''
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='daily_tasks' AND column_name=$1
+                '''
+                column_exists = await conn.fetchval(check_query, column_name)
+                
+                if not column_exists:
+                    # Если колонка не существует, добавляем её
+                    not_null_clause = 'NOT NULL' if is_not_null else ''
+                    default_clause = f' {default_value}' if default_value else ''
+                    alter_query = f'ALTER TABLE daily_tasks ADD COLUMN {column_name} {column_type} {not_null_clause} {default_clause}'
+                    await conn.execute(alter_query)
+                    logger.info(f"✅ Колонка {column_name} добавлена в таблицу daily_tasks (PostgreSQL)")
+            except Exception as e:
+                # Колонка уже существует или другая ошибка
+                logger.debug(f"Колонка {column_name} уже существует или ошибка: {e}")
+
+    async def _add_missing_users_columns_postgres(self, conn):
+        """Добавляет недостающие колонки в таблицу users для PostgreSQL"""
+        # Список колонок которые должны быть в таблице users
+        users_columns = [
+            ('subscription_level', 'INTEGER', 'DEFAULT 1', False),
+        ]
+
+        for column_name, column_type, default_value, is_not_null in users_columns:
+            try:
+                # Проверяем существует ли колонка
+                check_query = '''
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='users' AND column_name=$1
+                '''
+                column_exists = await conn.fetchval(check_query, column_name)
+                
+                if not column_exists:
+                    # Если колонка не существует, добавляем её
+                    not_null_clause = 'NOT NULL' if is_not_null else ''
+                    default_clause = f' {default_value}' if default_value else ''
+                    alter_query = f'ALTER TABLE users ADD COLUMN {column_name} {column_type} {not_null_clause} {default_clause}'
+                    await conn.execute(alter_query)
+                    logger.info(f"✅ Колонка {column_name} добавлена в таблицу users (PostgreSQL)")
             except Exception as e:
                 # Колонка уже существует или другая ошибка
                 logger.debug(f"Колонка {column_name} уже существует или ошибка: {e}")
@@ -903,81 +1001,213 @@ class Database:
 
     async def get_user(self, telegram_id: int) -> Optional[User]:
         """Получение пользователя по telegram_id"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM users WHERE telegram_id = ?",
-                (telegram_id,)
-            )
-            row = await cursor.fetchone()
-
-            if row:
-                # Преобразование строки даты в объект date
-                birth_date = None
-                if row['birth_date']:
-                    try:
-                        birth_date = date.fromisoformat(row['birth_date'])
-                    except ValueError:
-                        logger.warning(f"Неверный формат даты для пользователя {telegram_id}")
-
-                return User(
-                    telegram_id=row['telegram_id'],
-                    language=row['language'],
-                    name=row['name'],
-                    birth_date=birth_date,
-                    height=row['height'],
-                    weight=row['weight'],
-                    city=row['city'],
-                    referral_code=row['referral_code'],
-                    goal=row['goal'],
-                    subscription_active=bool(row['subscription_active']),
-                    subscription_start=row['subscription_start'],
-                    subscription_end=row['subscription_end'],
-                    referral_count=row['referral_count']
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                row = await conn.fetchrow(
+                    "SELECT * FROM users WHERE telegram_id = $1",
+                    telegram_id
                 )
-            return None
+                
+                if row:
+                    # Преобразование даты из PostgreSQL формата
+                    birth_date = None
+                    if row.get('birth_date'):
+                        if isinstance(row['birth_date'], date):
+                            birth_date = row['birth_date']
+                        elif isinstance(row['birth_date'], str):
+                            try:
+                                birth_date = date.fromisoformat(row['birth_date'])
+                            except ValueError:
+                                logger.warning(f"Неверный формат даты для пользователя {telegram_id}")
+                    
+                    # Конвертируем timestamp в int если нужно
+                    created_at = row.get('created_at')
+                    updated_at = row.get('updated_at')
+                    subscription_start = row.get('subscription_start')
+                    subscription_end = row.get('subscription_end')
+                    
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    elif created_at is None:
+                        created_at = 0
+                    
+                    if isinstance(updated_at, datetime.datetime):
+                        updated_at = int(updated_at.timestamp())
+                    elif updated_at is None:
+                        updated_at = 0
+                    
+                    if isinstance(subscription_start, datetime.datetime):
+                        subscription_start = int(subscription_start.timestamp())
+                    elif subscription_start is None:
+                        subscription_start = None
+                    
+                    if isinstance(subscription_end, datetime.datetime):
+                        subscription_end = int(subscription_end.timestamp())
+                    elif subscription_end is None:
+                        subscription_end = None
+                    
+                    return User(
+                        telegram_id=row['telegram_id'],
+                        language=row.get('language', 'ru'),
+                        name=row.get('name', ''),
+                        birth_date=birth_date,
+                        height=row.get('height'),
+                        weight=row.get('weight'),
+                        city=row.get('city'),
+                        referral_code=row.get('referral_code'),
+                        goal=row.get('goal'),
+                        subscription_active=bool(row.get('subscription_active', False)),
+                        subscription_start=subscription_start,
+                        subscription_end=subscription_end,
+                        referral_count=row.get('referral_count', 0)
+                    )
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM users WHERE telegram_id = ?",
+                    (telegram_id,)
+                )
+                row = await cursor.fetchone()
+
+                if row:
+                    # Преобразование строки даты в объект date
+                    birth_date = None
+                    if row['birth_date']:
+                        try:
+                            birth_date = date.fromisoformat(row['birth_date'])
+                        except ValueError:
+                            logger.warning(f"Неверный формат даты для пользователя {telegram_id}")
+
+                    return User(
+                        telegram_id=row['telegram_id'],
+                        language=row['language'],
+                        name=row['name'],
+                        birth_date=birth_date,
+                        height=row['height'],
+                        weight=row['weight'],
+                        city=row['city'],
+                        referral_code=row['referral_code'],
+                        goal=row['goal'],
+                        subscription_active=bool(row['subscription_active']),
+                        subscription_start=row['subscription_start'],
+                        subscription_end=row['subscription_end'],
+                        referral_count=row['referral_count']
+                    )
+                return None
 
     async def save_user(self, user: User):
         """Сохранение или обновление пользователя"""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Преобразование даты в строку для хранения
-            birth_date_str = user.birth_date.isoformat() if user.birth_date else None
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # Конвертируем timestamp в datetime для PostgreSQL
+                subscription_start = user.subscription_start
+                subscription_end = user.subscription_end
+                
+                if subscription_start and isinstance(subscription_start, int):
+                    subscription_start = datetime.datetime.fromtimestamp(subscription_start)
+                elif subscription_start is None:
+                    subscription_start = None
+                
+                if subscription_end and isinstance(subscription_end, int):
+                    subscription_end = datetime.datetime.fromtimestamp(subscription_end)
+                elif subscription_end is None:
+                    subscription_end = None
+                
+                # Используем текущее время для created_at и updated_at
+                current_time = datetime.datetime.now()
+                
+                # Получаем subscription_level из user, если есть, иначе используем значение по умолчанию
+                subscription_level = getattr(user, 'subscription_level', 1)
+                
+                # Конвертируем birth_date в строку для PostgreSQL
+                birth_date_str = user.birth_date.isoformat() if user.birth_date else None
+                
+                await conn.execute('''
+                    INSERT INTO users (telegram_id, language, name, birth_date, height, weight, city, referral_code, goal,
+                                      subscription_active, subscription_start, subscription_end, referral_count, subscription_level, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    ON CONFLICT(telegram_id) DO UPDATE SET
+                        language = EXCLUDED.language,
+                        name = EXCLUDED.name,
+                        birth_date = EXCLUDED.birth_date,
+                        height = EXCLUDED.height,
+                        weight = EXCLUDED.weight,
+                        city = EXCLUDED.city,
+                        referral_code = EXCLUDED.referral_code,
+                        goal = EXCLUDED.goal,
+                        subscription_active = EXCLUDED.subscription_active,
+                        subscription_start = EXCLUDED.subscription_start,
+                        subscription_end = EXCLUDED.subscription_end,
+                        referral_count = EXCLUDED.referral_count,
+                        subscription_level = EXCLUDED.subscription_level,
+                        updated_at = EXCLUDED.updated_at
+                ''',
+                    user.telegram_id,
+                    user.language,
+                    user.name,
+                    birth_date_str,
+                    user.height,
+                    user.weight,
+                    user.city,
+                    user.referral_code,
+                    user.goal,
+                    user.subscription_active,
+                    subscription_start,
+                    subscription_end,
+                    user.referral_count,
+                    subscription_level,
+                    current_time,
+                    current_time
+                )
+                logger.info(f"Пользователь {user.telegram_id} сохранен в PostgreSQL")
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Преобразование даты в строку для хранения
+                birth_date_str = user.birth_date.isoformat() if user.birth_date else None
 
-            await db.execute('''
-                INSERT INTO users (telegram_id, language, name, birth_date, height, weight, city, referral_code, goal,
-                                  subscription_active, subscription_start, subscription_end, referral_count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(telegram_id) DO UPDATE SET
-                    language = excluded.language,
-                    name = excluded.name,
-                    birth_date = excluded.birth_date,
-                    height = excluded.height,
-                    weight = excluded.weight,
-                    city = excluded.city,
-                    referral_code = excluded.referral_code,
-                    goal = excluded.goal,
-                    subscription_active = excluded.subscription_active,
-                    subscription_start = excluded.subscription_start,
-                    subscription_end = excluded.subscription_end,
-                    referral_count = excluded.referral_count,
-                    updated_at = CURRENT_TIMESTAMP
-            ''', (
-                user.telegram_id,
-                user.language,
-                user.name,
-                birth_date_str,
-                user.height,
-                user.weight,
-                user.city,
-                user.referral_code,
-                user.goal,
-                user.subscription_active,
-                user.subscription_start,
-                user.subscription_end,
-                user.referral_count
-            ))
-            await db.commit()
-            logger.info(f"Пользователь {user.telegram_id} сохранен")
+                await db.execute('''
+                    INSERT INTO users (telegram_id, language, name, birth_date, height, weight, city, referral_code, goal,
+                                      subscription_active, subscription_start, subscription_end, referral_count, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(telegram_id) DO UPDATE SET
+                        language = excluded.language,
+                        name = excluded.name,
+                        birth_date = excluded.birth_date,
+                        height = excluded.height,
+                        weight = excluded.weight,
+                        city = excluded.city,
+                        referral_code = excluded.referral_code,
+                        goal = excluded.goal,
+                        subscription_active = excluded.subscription_active,
+                        subscription_start = excluded.subscription_start,
+                        subscription_end = excluded.subscription_end,
+                        referral_count = excluded.referral_count,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (
+                    user.telegram_id,
+                    user.language,
+                    user.name,
+                    birth_date_str,
+                    user.height,
+                    user.weight,
+                    user.city,
+                    user.referral_code,
+                    user.goal,
+                    user.subscription_active,
+                    user.subscription_start,
+                    user.subscription_end,
+                    user.referral_count
+                ))
+                await db.commit()
+                logger.info(f"Пользователь {user.telegram_id} сохранен")
 
     async def update_user_field(self, telegram_id: int, field: str, value):
         """Обновление конкретного поля пользователя"""
@@ -1081,15 +1311,127 @@ class Database:
             logger.info(f"Платеж {payment.order_id} сохранен")
             return payment_id
 
+    async def get_payment_by_id(self, payment_id: int) -> Optional[Payment]:
+        """Получение платежа по ID"""
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                row = await conn.fetchrow(
+                    "SELECT * FROM payments WHERE id = $1",
+                    payment_id
+                )
+                if row:
+                    # Конвертируем datetime в timestamp если нужно
+                    created_at = row['created_at']
+                    paid_at = row.get('paid_at')
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    if paid_at and isinstance(paid_at, datetime.datetime):
+                        paid_at = int(paid_at.timestamp())
+                    
+                    subscription_level = row.get('subscription_level', 1) or 1
+                    return Payment(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row['payment_id'],
+                        order_id=row['order_id'],
+                        amount=float(row['amount']),
+                        months=row['months'],
+                        status=PaymentStatus(row['status']),
+                        created_at=created_at,
+                        paid_at=paid_at,
+                        currency=row.get('currency', 'RUB'),
+                        payment_method=row.get('payment_method', 'WATA'),
+                        subscription_level=subscription_level,
+                        discount_code=row.get('discount_code'),
+                        referral_used=row.get('referral_used'),
+                        subscription_type=row.get('subscription_type', 'standard')
+                    )
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM payments WHERE id = ?",
+                    (payment_id,)
+                )
+                row = await cursor.fetchone()
+
+            if row:
+                subscription_level = 1
+                try:
+                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                except (KeyError, IndexError):
+                    subscription_level = 1
+                
+                return Payment(
+                    id=row['id'],
+                    user_id=row['user_id'],
+                    payment_id=row['payment_id'],
+                    order_id=row['order_id'],
+                    amount=row['amount'],
+                    months=row['months'],
+                    status=PaymentStatus(row['status']),
+                    created_at=row['created_at'],
+                    paid_at=row['paid_at'],
+                    currency=row['currency'],
+                    payment_method=row['payment_method'],
+                    subscription_level=subscription_level,
+                    discount_code=row['discount_code'],
+                    referral_used=row['referral_used'],
+                    subscription_type=row['subscription_type']
+                )
+            return None
+
     async def get_payment_by_order_id(self, order_id: str) -> Optional[Payment]:
         """Получение платежа по order_id"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM payments WHERE order_id = ?",
-                (order_id,)
-            )
-            row = await cursor.fetchone()
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                row = await conn.fetchrow(
+                    "SELECT * FROM payments WHERE order_id = $1",
+                    order_id
+                )
+                if row:
+                    # Конвертируем datetime в timestamp если нужно
+                    created_at = row['created_at']
+                    paid_at = row.get('paid_at')
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    if paid_at and isinstance(paid_at, datetime.datetime):
+                        paid_at = int(paid_at.timestamp())
+                    
+                    subscription_level = row.get('subscription_level', 1) or 1
+                    return Payment(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row['payment_id'],
+                        order_id=row['order_id'],
+                        amount=float(row['amount']),
+                        months=row['months'],
+                        status=PaymentStatus(row['status']),
+                        created_at=created_at,
+                        paid_at=paid_at,
+                        currency=row.get('currency', 'RUB'),
+                        payment_method=row.get('payment_method', 'WATA'),
+                        subscription_level=subscription_level,
+                        discount_code=row.get('discount_code'),
+                        referral_used=row.get('referral_used'),
+                        subscription_type=row.get('subscription_type', 'standard')
+                    )
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM payments WHERE order_id = ?",
+                    (order_id,)
+                )
+                row = await cursor.fetchone()
 
         if row:
             # Проверяем наличие subscription_level в результате
@@ -1120,96 +1462,215 @@ class Database:
 
     async def get_pending_payments(self) -> list[Payment]:
         """Получение всех неоплаченных платежей"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM payments WHERE status = 'pending' ORDER BY created_at DESC"
-            )
-            rows = await cursor.fetchall()
-
-            payments = []
-            for row in rows:
-                # Проверяем наличие subscription_level в результате
-                subscription_level = 1  # По умолчанию
-                try:
-                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
-                except (KeyError, IndexError):
-                    subscription_level = 1
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                rows = await conn.fetch(
+                    "SELECT * FROM payments WHERE status = 'pending' ORDER BY created_at DESC"
+                )
                 
-                payments.append(Payment(
-                    id=row['id'],
-                    user_id=row['user_id'],
-                    payment_id=row['payment_id'],
-                    order_id=row['order_id'],
-                    amount=row['amount'],
-                    months=row['months'],
-                    status=PaymentStatus(row['status']),
-                    created_at=row['created_at'],
-                    paid_at=row['paid_at'],
-                    currency=row['currency'],
-                    payment_method=row['payment_method'],
-                    discount_code=row['discount_code'],
-                    referral_used=row['referral_used'],
-                    subscription_type=row['subscription_type'],
-                    subscription_level=subscription_level
-                ))
-            return payments
+                payments = []
+                for row in rows:
+                    # Конвертируем datetime в timestamp если нужно
+                    created_at = row.get('created_at')
+                    paid_at = row.get('paid_at')
+                    
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    elif created_at is None:
+                        created_at = 0
+                    
+                    if paid_at and isinstance(paid_at, datetime.datetime):
+                        paid_at = int(paid_at.timestamp())
+                    elif paid_at is None:
+                        paid_at = None
+                    
+                    payments.append(Payment(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row['payment_id'],
+                        order_id=row['order_id'],
+                        amount=row['amount'],
+                        months=row['months'],
+                        status=PaymentStatus(row['status']),
+                        created_at=created_at,
+                        paid_at=paid_at,
+                        currency=row.get('currency', 'RUB'),
+                        payment_method=row.get('payment_method', 'WATA'),
+                        discount_code=row.get('discount_code'),
+                        referral_used=row.get('referral_used'),
+                        subscription_type=row.get('subscription_type', 'standard'),
+                        subscription_level=row.get('subscription_level', 1)
+                    ))
+                return payments
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM payments WHERE status = 'pending' ORDER BY created_at DESC"
+                )
+                rows = await cursor.fetchall()
+
+                payments = []
+                for row in rows:
+                    # Проверяем наличие subscription_level в результате
+                    subscription_level = 1  # По умолчанию
+                    try:
+                        subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                    except (KeyError, IndexError):
+                        subscription_level = 1
+                    
+                    payments.append(Payment(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row['payment_id'],
+                        order_id=row['order_id'],
+                        amount=row['amount'],
+                        months=row['months'],
+                        status=PaymentStatus(row['status']),
+                        created_at=row['created_at'],
+                        paid_at=row['paid_at'],
+                        currency=row['currency'],
+                        payment_method=row['payment_method'],
+                        discount_code=row['discount_code'],
+                        referral_used=row['referral_used'],
+                        subscription_type=row['subscription_type'],
+                        subscription_level=subscription_level
+                    ))
+                return payments
 
     async def update_payment_status(self, payment_id: int, status: str, paid_at: Optional[int] = None):
         """Обновление статуса платежа"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                UPDATE payments
-                SET status = ?, paid_at = ?
-                WHERE id = ?
-            ''', (status, paid_at, payment_id))
-            await db.commit()
-            logger.info(f"Статус платежа {payment_id} обновлен на {status}")
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # Конвертируем timestamp в datetime для PostgreSQL если нужно
+                paid_at_datetime = None
+                if paid_at:
+                    if isinstance(paid_at, int):
+                        paid_at_datetime = datetime.datetime.fromtimestamp(paid_at)
+                    elif isinstance(paid_at, datetime.datetime):
+                        paid_at_datetime = paid_at
+                
+                await conn.execute('''
+                    UPDATE payments
+                    SET status = $1, paid_at = $2
+                    WHERE id = $3
+                ''', status, paid_at_datetime, payment_id)
+                logger.info(f"Статус платежа {payment_id} обновлен на {status} (PostgreSQL)")
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE payments
+                    SET status = ?, paid_at = ?
+                    WHERE id = ?
+                ''', (status, paid_at, payment_id))
+                await db.commit()
+                logger.info(f"Статус платежа {payment_id} обновлен на {status}")
 
     # Методы для работы с подписками
 
     async def save_subscription(self, subscription: Subscription) -> int:
         """Сохранение подписки в базу данных"""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Проверяем наличие колонки subscription_level
-            cursor = await db.execute("PRAGMA table_info(subscriptions)")
-            columns = [row[1] for row in await cursor.fetchall()]
-            has_subscription_level = 'subscription_level' in columns
-            
-            if has_subscription_level:
-                cursor = await db.execute('''
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # В таблице subscriptions колонки start_date и end_date имеют тип BIGINT (timestamp)
+                # created_at имеет тип TIMESTAMP, поэтому конвертируем если нужно
+                start_date = subscription.start_date
+                end_date = subscription.end_date
+                created_at = subscription.created_at
+                updated_at = subscription.updated_at
+                
+                # start_date и end_date уже должны быть int (timestamp)
+                if isinstance(start_date, datetime.datetime):
+                    start_date = int(start_date.timestamp())
+                elif start_date is None:
+                    start_date = 0
+                
+                if isinstance(end_date, datetime.datetime):
+                    end_date = int(end_date.timestamp())
+                elif end_date is None:
+                    end_date = 0
+                
+                # created_at может быть TIMESTAMP, конвертируем если нужно
+                if isinstance(created_at, int):
+                    created_at = datetime.datetime.fromtimestamp(created_at)
+                elif created_at is None:
+                    created_at = datetime.datetime.now()
+                
+                if isinstance(updated_at, int):
+                    updated_at = datetime.datetime.fromtimestamp(updated_at)
+                elif updated_at is None:
+                    updated_at = datetime.datetime.now()
+                
+                row = await conn.fetchrow('''
                     INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, subscription_level, status,
                                               auto_renew, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    RETURNING id
+                ''',
                     subscription.user_id,
                     subscription.payment_id,
-                    subscription.start_date,
-                    subscription.end_date,
+                    start_date,
+                    end_date,
                     subscription.months,
                     subscription.subscription_level,
                     subscription.status.value,
                     subscription.auto_renew,
-                    subscription.created_at,
-                    subscription.updated_at
-                ))
-            else:
-                # Fallback для старых версий БД
-                cursor = await db.execute('''
-                    INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
-                                              auto_renew, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    subscription.user_id,
-                    subscription.payment_id,
-                    subscription.start_date,
-                    subscription.end_date,
-                    subscription.months,
-                    subscription.status.value,
-                    subscription.auto_renew,
-                    subscription.created_at,
-                    subscription.updated_at
-                ))
+                    created_at,
+                    updated_at
+                )
+                subscription_id = row['id'] if row else None
+                logger.info(f"Подписка {subscription_id} для пользователя {subscription.user_id} сохранена в PostgreSQL")
+                return subscription_id
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Проверяем наличие колонки subscription_level
+                cursor = await db.execute("PRAGMA table_info(subscriptions)")
+                columns = [row[1] for row in await cursor.fetchall()]
+                has_subscription_level = 'subscription_level' in columns
+                
+                if has_subscription_level:
+                    cursor = await db.execute('''
+                        INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, subscription_level, status,
+                                                  auto_renew, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        subscription.user_id,
+                        subscription.payment_id,
+                        subscription.start_date,
+                        subscription.end_date,
+                        subscription.months,
+                        subscription.subscription_level,
+                        subscription.status.value,
+                        subscription.auto_renew,
+                        subscription.created_at,
+                        subscription.updated_at
+                    ))
+                else:
+                    # Fallback для старых версий БД
+                    cursor = await db.execute('''
+                        INSERT INTO subscriptions (user_id, payment_id, start_date, end_date, months, status,
+                                                  auto_renew, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        subscription.user_id,
+                        subscription.payment_id,
+                        subscription.start_date,
+                        subscription.end_date,
+                        subscription.months,
+                        subscription.status.value,
+                        subscription.auto_renew,
+                        subscription.created_at,
+                        subscription.updated_at
+                    ))
             subscription_id = cursor.lastrowid
             await db.commit()
             logger.info(f"Подписка {subscription_id} для пользователя {subscription.user_id} сохранена")
@@ -1217,123 +1678,326 @@ class Database:
 
     async def get_active_subscription(self, user_id: int) -> Optional[Subscription]:
         """Получение активной подписки пользователя"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT * FROM subscriptions
-                WHERE user_id = ? AND status = 'active' AND end_date > ?
-                ORDER BY end_date DESC
-                LIMIT 1
-            ''', (user_id, int(datetime.datetime.now().timestamp())))
-
-            row = await cursor.fetchone()
-            if row:
-                # Проверяем наличие колонки subscription_level
-                subscription_level = 1  # По умолчанию
-                try:
-                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
-                except (KeyError, IndexError):
-                    # Колонка отсутствует в старых версиях БД, определяем по месяцам
-                    months = row['months']
-                    if months >= 12:
-                        subscription_level = 3
-                    elif months >= 3:
-                        subscription_level = 2
-                    else:
-                        subscription_level = 1
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # В таблице subscriptions колонка end_date имеет тип BIGINT (timestamp)
+                # Поэтому используем timestamp (int) для сравнения
+                current_timestamp = int(datetime.datetime.now().timestamp())
                 
-                return Subscription(
-                    id=row['id'],
-                    user_id=row['user_id'],
-                    payment_id=row['payment_id'],
-                    start_date=row['start_date'],
-                    end_date=row['end_date'],
-                    months=row['months'],
-                    subscription_level=subscription_level,
-                    status=SubscriptionStatus(row['status']),
-                    auto_renew=bool(row['auto_renew']),
-                    created_at=row['created_at'],
-                    updated_at=row['updated_at']
-                )
-            return None
+                row = await conn.fetchrow('''
+                    SELECT * FROM subscriptions
+                    WHERE user_id = $1 AND status = 'active' AND end_date > $2
+                    ORDER BY end_date DESC
+                    LIMIT 1
+                ''', user_id, current_timestamp)
+                
+                if row:
+                    # В таблице subscriptions колонки start_date и end_date имеют тип BIGINT (timestamp)
+                    # created_at может быть TIMESTAMP, поэтому конвертируем если нужно
+                    start_date = row.get('start_date')
+                    end_date = row.get('end_date')
+                    created_at = row.get('created_at')
+                    updated_at = row.get('updated_at')
+                    
+                    # start_date и end_date уже должны быть int (BIGINT), но проверяем на всякий случай
+                    if isinstance(start_date, datetime.datetime):
+                        start_date = int(start_date.timestamp())
+                    elif isinstance(start_date, (int, float)):
+                        start_date = int(start_date)
+                    elif start_date is None:
+                        start_date = 0
+                    
+                    if isinstance(end_date, datetime.datetime):
+                        end_date = int(end_date.timestamp())
+                    elif isinstance(end_date, (int, float)):
+                        end_date = int(end_date)
+                    elif end_date is None:
+                        end_date = 0
+                    
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    elif isinstance(created_at, (int, float)):
+                        created_at = int(created_at)
+                    elif created_at is None:
+                        created_at = 0
+                    
+                    if isinstance(updated_at, datetime.datetime):
+                        updated_at = int(updated_at.timestamp())
+                    elif isinstance(updated_at, (int, float)):
+                        updated_at = int(updated_at)
+                    elif updated_at is None:
+                        updated_at = 0
+                    
+                    # Проверяем наличие колонки subscription_level
+                    subscription_level = row.get('subscription_level', 1) or 1
+                    if subscription_level is None:
+                        # Определяем по месяцам если subscription_level отсутствует
+                        months = row.get('months', 0)
+                        if months >= 12:
+                            subscription_level = 3
+                        elif months >= 3:
+                            subscription_level = 2
+                        else:
+                            subscription_level = 1
+                    
+                    return Subscription(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row.get('payment_id', ''),
+                        start_date=start_date,
+                        end_date=end_date,
+                        months=row.get('months', 0),
+                        subscription_level=subscription_level,
+                        status=SubscriptionStatus(row['status']),
+                        auto_renew=bool(row.get('auto_renew', False)),
+                        created_at=created_at,
+                        updated_at=updated_at
+                    )
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM subscriptions
+                    WHERE user_id = ? AND status = 'active' AND end_date > ?
+                    ORDER BY end_date DESC
+                    LIMIT 1
+                ''', (user_id, int(datetime.datetime.now().timestamp())))
+
+                row = await cursor.fetchone()
+                if row:
+                    # Проверяем наличие колонки subscription_level
+                    subscription_level = 1  # По умолчанию
+                    try:
+                        subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                    except (KeyError, IndexError):
+                        # Колонка отсутствует в старых версиях БД, определяем по месяцам
+                        months = row['months']
+                        if months >= 12:
+                            subscription_level = 3
+                        elif months >= 3:
+                            subscription_level = 2
+                        else:
+                            subscription_level = 1
+                    
+                    return Subscription(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row['payment_id'],
+                        start_date=row['start_date'],
+                        end_date=row['end_date'],
+                        months=row['months'],
+                        subscription_level=subscription_level,
+                        status=SubscriptionStatus(row['status']),
+                        auto_renew=bool(row['auto_renew']),
+                        created_at=row['created_at'],
+                        updated_at=row['updated_at']
+                    )
+                return None
 
     async def get_user_subscriptions(self, user_id: int) -> list[Subscription]:
         """Получение всех подписок пользователя"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT * FROM subscriptions
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            ''', (user_id,))
-
-            rows = await cursor.fetchall()
-            subscriptions = []
-
-            for row in rows:
-                # Проверяем наличие колонки subscription_level
-                subscription_level = 1  # По умолчанию
-                try:
-                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
-                except (KeyError, IndexError):
-                    # Колонка отсутствует в старых версиях БД, определяем по месяцам
-                    months = row['months']
-                    if months >= 12:
-                        subscription_level = 3
-                    elif months >= 3:
-                        subscription_level = 2
-                    else:
-                        subscription_level = 1
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                rows = await conn.fetch('''
+                    SELECT * FROM subscriptions
+                    WHERE user_id = $1
+                    ORDER BY created_at DESC
+                ''', user_id)
                 
-                subscriptions.append(Subscription(
-                    id=row['id'],
-                    user_id=row['user_id'],
-                    payment_id=row['payment_id'],
-                    start_date=row['start_date'],
-                    end_date=row['end_date'],
-                    months=row['months'],
-                    subscription_level=subscription_level,
-                    status=SubscriptionStatus(row['status']),
-                    auto_renew=bool(row['auto_renew']),
-                    created_at=row['created_at'],
-                    updated_at=row['updated_at']
-                ))
+                subscriptions = []
+                for row in rows:
+                    # Конвертируем datetime в timestamp если нужно
+                    start_date = row.get('start_date')
+                    end_date = row.get('end_date')
+                    created_at = row.get('created_at')
+                    updated_at = row.get('updated_at')
+                    
+                    # start_date и end_date имеют тип BIGINT (timestamp)
+                    if isinstance(start_date, datetime.datetime):
+                        start_date = int(start_date.timestamp())
+                    elif isinstance(start_date, (int, float)):
+                        start_date = int(start_date)
+                    elif start_date is None:
+                        start_date = 0
+                    
+                    if isinstance(end_date, datetime.datetime):
+                        end_date = int(end_date.timestamp())
+                    elif isinstance(end_date, (int, float)):
+                        end_date = int(end_date)
+                    elif end_date is None:
+                        end_date = 0
+                    
+                    # created_at может быть TIMESTAMP
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    elif isinstance(created_at, (int, float)):
+                        created_at = int(created_at)
+                    elif created_at is None:
+                        created_at = 0
+                    
+                    if isinstance(updated_at, datetime.datetime):
+                        updated_at = int(updated_at.timestamp())
+                    elif isinstance(updated_at, (int, float)):
+                        updated_at = int(updated_at)
+                    elif updated_at is None:
+                        updated_at = 0
+                    
+                    # Проверяем наличие колонки subscription_level
+                    subscription_level = row.get('subscription_level', 1) or 1
+                    if subscription_level is None:
+                        # Определяем по месяцам если subscription_level отсутствует
+                        months = row.get('months', 0)
+                        if months >= 12:
+                            subscription_level = 3
+                        elif months >= 3:
+                            subscription_level = 2
+                        else:
+                            subscription_level = 1
+                    
+                    subscriptions.append(Subscription(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row.get('payment_id', ''),
+                        start_date=start_date,
+                        end_date=end_date,
+                        months=row.get('months', 0),
+                        subscription_level=subscription_level,
+                        status=SubscriptionStatus(row['status']),
+                        auto_renew=bool(row.get('auto_renew', False)),
+                        created_at=created_at,
+                        updated_at=updated_at
+                    ))
+                return subscriptions
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM subscriptions
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                ''', (user_id,))
+
+                rows = await cursor.fetchall()
+                subscriptions = []
+
+                for row in rows:
+                    # Проверяем наличие колонки subscription_level
+                    subscription_level = 1  # По умолчанию
+                    try:
+                        subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                    except (KeyError, IndexError):
+                        # Колонка отсутствует в старых версиях БД, определяем по месяцам
+                        months = row['months']
+                        if months >= 12:
+                            subscription_level = 3
+                        elif months >= 3:
+                            subscription_level = 2
+                        else:
+                            subscription_level = 1
+                    
+                    subscriptions.append(Subscription(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        payment_id=row['payment_id'],
+                        start_date=row['start_date'],
+                        end_date=row['end_date'],
+                        months=row['months'],
+                        subscription_level=subscription_level,
+                        status=SubscriptionStatus(row['status']),
+                        auto_renew=bool(row['auto_renew']),
+                        created_at=row['created_at'],
+                        updated_at=row['updated_at']
+                    ))
 
             return subscriptions
 
     async def update_subscription_status(self, subscription_id: int, status: str):
         """Обновление статуса подписки"""
-        async with aiosqlite.connect(self.db_path) as db:
-            current_time = int(datetime.datetime.now().timestamp())
-            await db.execute('''
-                UPDATE subscriptions
-                SET status = ?, updated_at = ?
-                WHERE id = ?
-            ''', (status, current_time, subscription_id))
-            await db.commit()
-            logger.info(f"Статус подписки {subscription_id} обновлен на {status}")
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # В таблице subscriptions колонка updated_at может быть TIMESTAMP или BIGINT
+                # Используем текущее время как TIMESTAMP
+                current_time = datetime.datetime.now()
+                
+                await conn.execute('''
+                    UPDATE subscriptions
+                    SET status = $1, updated_at = $2
+                    WHERE id = $3
+                ''', status, current_time, subscription_id)
+                logger.info(f"Статус подписки {subscription_id} обновлен на {status} (PostgreSQL)")
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                current_time = int(datetime.datetime.now().timestamp())
+                await db.execute('''
+                    UPDATE subscriptions
+                    SET status = ?, updated_at = ?
+                    WHERE id = ?
+                ''', (status, current_time, subscription_id))
+                await db.commit()
+                logger.info(f"Статус подписки {subscription_id} обновлен на {status}")
 
     async def activate_user_subscription(self, user_id: int, subscription_start: int, subscription_end: int):
         """Активация подписки пользователя"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                UPDATE users
-                SET subscription_active = TRUE, subscription_start = ?, subscription_end = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE telegram_id = ?
-            ''', (subscription_start, subscription_end, user_id))
-            await db.commit()
-            logger.info(f"Подписка пользователя {user_id} активирована")
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # Конвертируем timestamp в datetime для PostgreSQL
+                start_datetime = datetime.datetime.fromtimestamp(subscription_start) if isinstance(subscription_start, int) else subscription_start
+                end_datetime = datetime.datetime.fromtimestamp(subscription_end) if isinstance(subscription_end, int) else subscription_end
+                current_time = datetime.datetime.now()
+                
+                await conn.execute('''
+                    UPDATE users
+                    SET subscription_active = TRUE, subscription_start = $1, subscription_end = $2, updated_at = $3
+                    WHERE telegram_id = $4
+                ''', start_datetime, end_datetime, current_time, user_id)
+                logger.info(f"Подписка пользователя {user_id} активирована (PostgreSQL)")
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE users
+                    SET subscription_active = TRUE, subscription_start = ?, subscription_end = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE telegram_id = ?
+                ''', (subscription_start, subscription_end, user_id))
+                await db.commit()
+                logger.info(f"Подписка пользователя {user_id} активирована")
 
     async def deactivate_user_subscription(self, user_id: int):
         """Деактивация подписки пользователя"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                UPDATE users
-                SET subscription_active = FALSE, subscription_start = NULL, subscription_end = NULL, updated_at = CURRENT_TIMESTAMP
-                WHERE telegram_id = ?
-            ''', (user_id,))
-            await db.commit()
-            logger.info(f"Подписка пользователя {user_id} деактивирована")
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                current_time = datetime.datetime.now()
+                
+                await conn.execute('''
+                    UPDATE users
+                    SET subscription_active = FALSE, subscription_start = NULL, subscription_end = NULL, updated_at = $1
+                    WHERE telegram_id = $2
+                ''', current_time, user_id)
+                logger.info(f"Подписка пользователя {user_id} деактивирована (PostgreSQL)")
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE users
+                    SET subscription_active = FALSE, subscription_start = NULL, subscription_end = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE telegram_id = ?
+                ''', (user_id,))
+                await db.commit()
+                logger.info(f"Подписка пользователя {user_id} деактивирована")
 
     # Методы для работы со статами игрока
 
@@ -1499,46 +2163,116 @@ class Database:
 
     async def save_daily_task(self, task: DailyTask) -> int:
         """Сохранение ежедневного задания"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute('''
-                INSERT INTO daily_tasks (user_id, task_description, created_at, expires_at, status, completed_at, submitted_media_path, moderator_comment)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                task.user_id,
-                task.task_description,
-                task.created_at,
-                task.expires_at,
-                task.status.value,
-                task.completed_at,
-                task.submitted_media_path,
-                task.moderator_comment
-            ))
-            task_id = cursor.lastrowid
-            await db.commit()
-            logger.info(f"Ежедневное задание для пользователя {task.user_id} сохранено")
-            return task_id
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # Конвертируем timestamp в datetime для PostgreSQL
+                created_at = task.created_at
+                expires_at = task.expires_at
+                completed_at = task.completed_at
+                
+                if isinstance(created_at, int):
+                    created_at = datetime.datetime.fromtimestamp(created_at)
+                elif created_at is None:
+                    created_at = datetime.datetime.now()
+                
+                if expires_at and isinstance(expires_at, int):
+                    expires_at = datetime.datetime.fromtimestamp(expires_at)
+                elif expires_at is None:
+                    expires_at = None
+                
+                if completed_at and isinstance(completed_at, int):
+                    completed_at = datetime.datetime.fromtimestamp(completed_at)
+                elif completed_at is None:
+                    completed_at = None
+                
+                row = await conn.fetchrow('''
+                    INSERT INTO daily_tasks (user_id, task_description, created_at, expires_at, status, completed_at, submitted_media_path, moderator_comment)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING id
+                ''',
+                    task.user_id,
+                    task.task_description,
+                    created_at,
+                    expires_at,
+                    task.status.value,
+                    completed_at,
+                    task.submitted_media_path,
+                    task.moderator_comment
+                )
+                task_id = row['id'] if row else None
+                logger.info(f"Ежедневное задание для пользователя {task.user_id} сохранено в PostgreSQL, id={task_id}")
+                return task_id
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO daily_tasks (user_id, task_description, created_at, expires_at, status, completed_at, submitted_media_path, moderator_comment)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    task.user_id,
+                    task.task_description,
+                    task.created_at,
+                    task.expires_at,
+                    task.status.value,
+                    task.completed_at,
+                    task.submitted_media_path,
+                    task.moderator_comment
+                ))
+                task_id = cursor.lastrowid
+                await db.commit()
+                logger.info(f"Ежедневное задание для пользователя {task.user_id} сохранено")
+                return task_id
 
     async def get_active_daily_task(self, user_id: int) -> Optional[DailyTask]:
         """Получение активного ежедневного задания пользователя (ожидающего выполнения или на проверке)"""
         if self.use_postgres:
             conn = await _get_postgres_connection()
             try:
+                # Конвертируем текущее время в datetime для PostgreSQL
+                current_time = datetime.datetime.now()
+                
                 row = await conn.fetchrow('''
                     SELECT * FROM daily_tasks
-                    WHERE user_id = $1 AND status IN ('pending', 'submitted') AND expires_at > $2
+                    WHERE user_id = $1 AND status IN ('pending', 'submitted') 
+                    AND (expires_at IS NULL OR expires_at > $2)
                     ORDER BY created_at DESC
                     LIMIT 1
-                ''', user_id, int(datetime.datetime.now().timestamp()))
+                ''', user_id, current_time)
                 
                 if row:
+                    # Конвертируем datetime в timestamp если нужно
+                    created_at = row['created_at']
+                    expires_at = row.get('expires_at')
+                    completed_at = row.get('completed_at')
+                    
+                    if isinstance(created_at, datetime.datetime):
+                        created_at = int(created_at.timestamp())
+                    elif created_at is None:
+                        created_at = 0
+                    
+                    if expires_at and isinstance(expires_at, datetime.datetime):
+                        expires_at = int(expires_at.timestamp())
+                    elif expires_at is None:
+                        expires_at = None
+                    
+                    if completed_at and isinstance(completed_at, datetime.datetime):
+                        completed_at = int(completed_at.timestamp())
+                    elif completed_at is None:
+                        completed_at = None
+                    
+                    # Используем task_description если есть, иначе task (для обратной совместимости)
+                    task_description = row.get('task_description') or row.get('task', '')
+                    
                     return DailyTask(
                         id=row['id'],
                         user_id=row['user_id'],
-                        task_description=row['task_description'],
-                        created_at=row['created_at'],
-                        expires_at=row['expires_at'],
+                        task_description=task_description,
+                        created_at=created_at,
+                        expires_at=expires_at,
                         status=TaskStatus(row['status']),
-                        completed_at=row['completed_at'],
+                        completed_at=completed_at,
                         submitted_media_path=row.get('submitted_media_path'),
                         moderator_comment=row.get('moderator_comment')
                     )
@@ -1799,22 +2533,41 @@ class Database:
 
     async def get_top_users_by_subscription_level(self, subscription_level: int, limit: int = 10) -> list[tuple]:
         """Получение топ пользователей по уровню подписки"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute('''
-                SELECT u.name, us.level, us.experience, us.rank, u.city
-                FROM users u
-                JOIN user_stats us ON u.telegram_id = us.user_id
-                JOIN subscriptions s ON u.telegram_id = s.user_id
-                WHERE s.subscription_level = ? 
-                AND s.status = 'active'
-                AND s.end_date > ?
-                AND u.subscription_active = TRUE
-                ORDER BY us.level DESC, us.experience DESC
-                LIMIT ?
-            ''', (subscription_level, int(datetime.datetime.now().timestamp()), limit))
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                rows = await conn.fetch('''
+                    SELECT u.name, us.level, us.experience, us.rank, u.city
+                    FROM users u
+                    JOIN user_stats us ON u.telegram_id = us.user_id
+                    JOIN subscriptions s ON u.telegram_id = s.user_id
+                    WHERE s.subscription_level = $1 
+                    AND s.status = 'active'
+                    AND s.end_date > $2
+                    ORDER BY us.level DESC, us.experience DESC
+                    LIMIT $3
+                ''', subscription_level, int(datetime.datetime.now().timestamp()), limit)
+                
+                return [(row['name'], row['level'], row['experience'], row['rank'], row['city']) for row in rows]
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    SELECT u.name, us.level, us.experience, us.rank, u.city
+                    FROM users u
+                    JOIN user_stats us ON u.telegram_id = us.user_id
+                    JOIN subscriptions s ON u.telegram_id = s.user_id
+                    WHERE s.subscription_level = ? 
+                    AND s.status = 'active'
+                    AND s.end_date > ?
+                    AND u.subscription_active = TRUE
+                    ORDER BY us.level DESC, us.experience DESC
+                    LIMIT ?
+                ''', (subscription_level, int(datetime.datetime.now().timestamp()), limit))
 
-            rows = await cursor.fetchall()
-            return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
+                rows = await cursor.fetchall()
+                return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
 
     async def get_user_rating_position(self, user_id: int) -> int:
         """Получение позиции пользователя в общем рейтинге (по уровню и опыту)"""
@@ -1880,48 +2633,81 @@ class Database:
 
     async def get_subscriptions_expiring_soon(self, days_before: int = 3) -> list[dict]:
         """Получение подписок, которые истекают через указанное количество дней"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            current_time = int(datetime.datetime.now().timestamp())
-            target_time = current_time + (days_before * 24 * 60 * 60)
-            
-            # Получаем подписки, которые истекают через указанное количество дней (±1 день для точности)
-            cursor = await db.execute('''
-                SELECT DISTINCT 
-                    u.telegram_id,
-                    s.end_date,
-                    s.subscription_level
-                FROM users u
-                JOIN subscriptions s ON u.telegram_id = s.user_id
-                WHERE u.subscription_active = 1 
-                AND s.status = 'active'
-                AND s.end_date > ?
-                AND s.end_date <= ?
-                AND s.id = (
-                    SELECT id FROM subscriptions s2 
-                    WHERE s2.user_id = u.telegram_id 
-                    AND s2.status = 'active' 
-                    AND s2.end_date > ?
-                    ORDER BY s2.end_date DESC 
-                    LIMIT 1
-                )
-            ''', (current_time, target_time, current_time))
-            
-            rows = await cursor.fetchall()
-            result = []
-            for row in rows:
-                subscription_level = 1
-                try:
-                    subscription_level = row['subscription_level'] if row['subscription_level'] else 1
-                except (KeyError, IndexError):
-                    subscription_level = 1
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # В таблице subscriptions колонка end_date имеет тип BIGINT (timestamp)
+                current_timestamp = int(datetime.datetime.now().timestamp())
+                target_timestamp = current_timestamp + (days_before * 24 * 60 * 60)
                 
-                result.append({
-                    'user_id': row['telegram_id'],
-                    'end_date': row['end_date'],
-                    'subscription_level': subscription_level
-                })
-            return result
+                rows = await conn.fetch('''
+                    SELECT user_id, end_date
+                    FROM subscriptions
+                    WHERE status = 'active'
+                    AND end_date > $1
+                    AND end_date <= $2
+                    ORDER BY end_date ASC
+                ''', current_timestamp, target_timestamp)
+                
+                result = []
+                for row in rows:
+                    end_date = row['end_date']
+                    # Конвертируем в int если нужно
+                    if isinstance(end_date, datetime.datetime):
+                        end_date = int(end_date.timestamp())
+                    elif isinstance(end_date, (int, float)):
+                        end_date = int(end_date)
+                    
+                    result.append({
+                        'user_id': row['user_id'],
+                        'end_date': end_date
+                    })
+                return result
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                current_time = int(datetime.datetime.now().timestamp())
+                target_time = current_time + (days_before * 24 * 60 * 60)
+                
+                # Получаем подписки, которые истекают через указанное количество дней (±1 день для точности)
+                cursor = await db.execute('''
+                    SELECT DISTINCT 
+                        u.telegram_id,
+                        s.end_date,
+                        s.subscription_level
+                    FROM users u
+                    JOIN subscriptions s ON u.telegram_id = s.user_id
+                    WHERE u.subscription_active = 1 
+                    AND s.status = 'active'
+                    AND s.end_date > ?
+                    AND s.end_date <= ?
+                    AND s.id = (
+                        SELECT id FROM subscriptions s2 
+                        WHERE s2.user_id = u.telegram_id 
+                        AND s2.status = 'active' 
+                        AND s2.end_date > ?
+                        ORDER BY s2.end_date DESC 
+                        LIMIT 1
+                    )
+                ''', (current_time, target_time, current_time))
+                
+                rows = await cursor.fetchall()
+                result = []
+                for row in rows:
+                    subscription_level = 1
+                    try:
+                        subscription_level = row['subscription_level'] if row['subscription_level'] else 1
+                    except (KeyError, IndexError):
+                        subscription_level = 1
+                
+                    result.append({
+                        'user_id': row['telegram_id'],
+                        'end_date': row['end_date'],
+                        'subscription_level': subscription_level
+                    })
+                return result
 
     async def get_all_active_subscribed_users(self) -> list[dict]:
         """Получение всех пользователей с активной подпиской"""
@@ -2515,44 +3301,82 @@ class Database:
 
     async def get_unsent_notifications(self, user_id: int = None, limit: int = 50) -> list[dict]:
         """Получение неотправленных уведомлений"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                if user_id:
+                    rows = await conn.fetch('''
+                        SELECT * FROM notifications
+                        WHERE user_id = $1 AND is_sent = FALSE
+                        ORDER BY created_at ASC
+                        LIMIT $2
+                    ''', user_id, limit)
+                else:
+                    rows = await conn.fetch('''
+                        SELECT * FROM notifications
+                        WHERE is_sent = FALSE
+                        ORDER BY created_at ASC
+                        LIMIT $1
+                    ''', limit)
+                
+                return [dict(row) for row in rows]
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
 
-            if user_id:
-                cursor = await db.execute('''
-                    SELECT * FROM notifications
-                    WHERE user_id = ? AND is_sent = FALSE
-                    ORDER BY created_at ASC
-                    LIMIT ?
-                ''', (user_id, limit))
-            else:
-                cursor = await db.execute('''
-                    SELECT * FROM notifications
-                    WHERE is_sent = FALSE
-                    ORDER BY created_at ASC
-                    LIMIT ?
-                ''', (limit,))
+                if user_id:
+                    cursor = await db.execute('''
+                        SELECT * FROM notifications
+                        WHERE user_id = ? AND is_sent = FALSE
+                        ORDER BY created_at ASC
+                        LIMIT ?
+                    ''', (user_id, limit))
+                else:
+                    cursor = await db.execute('''
+                        SELECT * FROM notifications
+                        WHERE is_sent = FALSE
+                        ORDER BY created_at ASC
+                        LIMIT ?
+                    ''', (limit,))
 
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
 
     async def mark_notification_sent(self, notification_id: int) -> bool:
         """Отметить уведомление как отправленное"""
-        async with aiosqlite.connect(self.db_path) as db:
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
             try:
-                await db.execute('''
+                await conn.execute('''
                     UPDATE notifications
-                    SET is_sent = TRUE, sent_at = ?
-                    WHERE id = ?
-                ''', (int(datetime.datetime.now().timestamp()), notification_id))
-
-                await db.commit()
+                    SET is_sent = TRUE, sent_at = $1
+                    WHERE id = $2
+                ''', datetime.datetime.now(), notification_id)
+                logger.info(f"Уведомление {notification_id} отмечено как отправленное (PostgreSQL)")
                 return True
-
             except Exception as e:
-                await db.rollback()
                 logger.error(f"Ошибка при отметке уведомления {notification_id} как отправленного: {e}")
                 return False
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                try:
+                    await db.execute('''
+                        UPDATE notifications
+                        SET is_sent = TRUE, sent_at = ?
+                        WHERE id = ?
+                    ''', (int(datetime.datetime.now().timestamp()), notification_id))
+
+                    await db.commit()
+                    return True
+
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"Ошибка при отметке уведомления {notification_id} как отправленного: {e}")
+                    return False
 
     async def send_task_result_notification(self, task_id: int, approved: bool, experience_reward: int = 0,
                                           stat_rewards: dict = None, reason: str = "") -> bool:
@@ -2629,293 +3453,550 @@ class Database:
     # Методы для работы с блогерами
     async def get_blogger_stats(self, blogger_telegram_id: int) -> dict:
         """Получение статистики блогера"""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Получаем реферальный код блогера
-            blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
-            if not blogger:
-                return {'error': 'Блогер не найден'}
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # Получаем реферальный код блогера
+                blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
+                if not blogger:
+                    return {'error': 'Блогер не найден'}
 
-            referral_code = blogger['referral_code']
+                referral_code = blogger['referral_code']
 
-            # Статистика подписчиков
-            cursor = await db.execute('''
-                SELECT COUNT(*) as total_subscribers
-                FROM users
-                WHERE referral_code = ?
-            ''', (referral_code,))
+                # Статистика подписчиков
+                total_subscribers = await conn.fetchval('''
+                    SELECT COUNT(*) FROM users WHERE referral_code = $1
+                ''', referral_code) or 0
 
-            subscribers_row = await cursor.fetchone()
-            total_subscribers = subscribers_row[0] if subscribers_row else 0
+                # Статистика активных подписчиков (с подпиской)
+                active_subscribers = await conn.fetchval('''
+                    SELECT COUNT(*) FROM users WHERE referral_code = $1 AND subscription_active = TRUE
+                ''', referral_code) or 0
 
-            # Статистика активных подписчиков (с подпиской)
-            cursor = await db.execute('''
-                SELECT COUNT(*) as active_subscribers
-                FROM users
-                WHERE referral_code = ? AND subscription_active = 1
-            ''', (referral_code,))
+                # Количество выполненных заданий подписчиками
+                total_tasks = await conn.fetchval('''
+                    SELECT COUNT(*) FROM daily_tasks dt
+                    JOIN users u ON dt.user_id = u.telegram_id
+                    WHERE u.referral_code = $1 AND dt.status IN ('approved', 'completed')
+                ''', referral_code) or 0
 
-            active_row = await cursor.fetchone()
-            active_subscribers = active_row[0] if active_row else 0
+                return {
+                    'referral_code': referral_code,
+                    'total_subscribers': total_subscribers,
+                    'active_subscribers': active_subscribers,
+                    'inactive_subscribers': total_subscribers - active_subscribers,
+                    'total_tasks_completed': total_tasks
+                }
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Получаем реферальный код блогера
+                blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
+                if not blogger:
+                    return {'error': 'Блогер не найден'}
 
-            # Количество выполненных заданий подписчиками
-            cursor = await db.execute('''
-                SELECT COUNT(*) as total_tasks
-                FROM daily_tasks dt
-                JOIN users u ON dt.user_id = u.telegram_id
-                WHERE u.referral_code = ? AND dt.status IN ('approved', 'completed')
-            ''', (referral_code,))
+                referral_code = blogger['referral_code']
 
-            tasks_row = await cursor.fetchone()
-            total_tasks = tasks_row[0] if tasks_row else 0
+                # Статистика подписчиков
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as total_subscribers
+                    FROM users
+                    WHERE referral_code = ?
+                ''', (referral_code,))
 
-            return {
-                'referral_code': referral_code,
-                'total_subscribers': total_subscribers,
-                'active_subscribers': active_subscribers,
-                'inactive_subscribers': total_subscribers - active_subscribers,
-                'total_tasks_completed': total_tasks
-            }
+                subscribers_row = await cursor.fetchone()
+                total_subscribers = subscribers_row[0] if subscribers_row else 0
+
+                # Статистика активных подписчиков (с подпиской)
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as active_subscribers
+                    FROM users
+                    WHERE referral_code = ? AND subscription_active = 1
+                ''', (referral_code,))
+
+                active_row = await cursor.fetchone()
+                active_subscribers = active_row[0] if active_row else 0
+
+                # Количество выполненных заданий подписчиками
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as total_tasks
+                    FROM daily_tasks dt
+                    JOIN users u ON dt.user_id = u.telegram_id
+                    WHERE u.referral_code = ? AND dt.status IN ('approved', 'completed')
+                ''', (referral_code,))
+
+                tasks_row = await cursor.fetchone()
+                total_tasks = tasks_row[0] if tasks_row else 0
+
+                return {
+                    'referral_code': referral_code,
+                    'total_subscribers': total_subscribers,
+                    'active_subscribers': active_subscribers,
+                    'inactive_subscribers': total_subscribers - active_subscribers,
+                    'total_tasks_completed': total_tasks
+                }
 
     async def get_blogger_top_subscribers(self, blogger_telegram_id: int, limit: int = 10) -> list[dict]:
         """Получение топ-10 подписчиков блогера по опыту"""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Получаем реферальный код блогера
-            blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
-            if not blogger:
-                return []
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # Получаем реферальный код блогера
+                blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
+                if not blogger:
+                    return []
 
-            referral_code = blogger['referral_code']
+                referral_code = blogger['referral_code']
 
-            # Получаем топ подписчиков по опыту
-            cursor = await db.execute('''
-                SELECT
-                    u.telegram_id,
-                    u.name,
-                    ps.nickname,
-                    us.experience,
-                    us.level,
-                    COUNT(dt.id) as tasks_completed
-                FROM users u
-                LEFT JOIN user_stats us ON u.telegram_id = us.user_id
-                LEFT JOIN player_stats ps ON u.telegram_id = ps.user_id
-                LEFT JOIN daily_tasks dt ON u.telegram_id = dt.user_id AND dt.status IN ('approved', 'completed')
-                WHERE u.referral_code = ?
-                GROUP BY u.telegram_id, u.name, ps.nickname, us.experience, us.level
-                ORDER BY us.experience DESC, tasks_completed DESC
-                LIMIT ?
-            ''', (referral_code, limit))
+                # Получаем топ подписчиков по опыту
+                rows = await conn.fetch('''
+                    SELECT
+                        u.telegram_id,
+                        u.name,
+                        ps.nickname,
+                        us.experience,
+                        us.level,
+                        COUNT(dt.id) as tasks_completed
+                    FROM users u
+                    LEFT JOIN user_stats us ON u.telegram_id = us.user_id
+                    LEFT JOIN player_stats ps ON u.telegram_id = ps.user_id
+                    LEFT JOIN daily_tasks dt ON u.telegram_id = dt.user_id AND dt.status IN ('approved', 'completed')
+                    WHERE u.referral_code = $1 AND u.subscription_active = TRUE
+                    GROUP BY u.telegram_id, u.name, ps.nickname, us.experience, us.level
+                    ORDER BY us.experience DESC, us.level DESC
+                    LIMIT $2
+                ''', referral_code, limit)
 
-            rows = await cursor.fetchall()
+                result = []
+                for row in rows:
+                    result.append({
+                        'telegram_id': row['telegram_id'],
+                        'name': row['name'],
+                        'nickname': row['nickname'],
+                        'experience': row['experience'] or 0,
+                        'level': row['level'] or 1,
+                        'tasks_completed': row['tasks_completed'] or 0
+                    })
+                return result
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Получаем реферальный код блогера
+                blogger = await self.get_blogger_by_telegram_id(blogger_telegram_id)
+                if not blogger:
+                    return []
 
-            result = []
-            for row in rows:
-                telegram_id, name, nickname, experience, level, tasks_completed = row
-                display_name = nickname or name or f"User_{telegram_id}"
+                referral_code = blogger['referral_code']
 
-                result.append({
-                    'telegram_id': telegram_id,
-                    'display_name': display_name,
-                    'experience': experience or 0,
-                    'level': level or 1,
-                    'tasks_completed': tasks_completed or 0
-                })
+                # Получаем топ подписчиков по опыту
+                cursor = await db.execute('''
+                    SELECT
+                        u.telegram_id,
+                        u.name,
+                        ps.nickname,
+                        us.experience,
+                        us.level,
+                        COUNT(dt.id) as tasks_completed
+                    FROM users u
+                    LEFT JOIN user_stats us ON u.telegram_id = us.user_id
+                    LEFT JOIN player_stats ps ON u.telegram_id = ps.user_id
+                    LEFT JOIN daily_tasks dt ON u.telegram_id = dt.user_id AND dt.status IN ('approved', 'completed')
+                    WHERE u.referral_code = ?
+                    GROUP BY u.telegram_id, u.name, ps.nickname, us.experience, us.level
+                    ORDER BY us.experience DESC, tasks_completed DESC
+                    LIMIT ?
+                ''', (referral_code, limit))
 
-            return result
+                rows = await cursor.fetchall()
+
+                result = []
+                for row in rows:
+                    telegram_id, name, nickname, experience, level, tasks_completed = row
+                    display_name = nickname or name or f"User_{telegram_id}"
+
+                    result.append({
+                        'telegram_id': telegram_id,
+                        'display_name': display_name,
+                        'experience': experience or 0,
+                        'level': level or 1,
+                        'tasks_completed': tasks_completed or 0
+                    })
+
+                return result
 
     # Методы для статистики модерации
     async def get_moderator_stats(self, moderator_id: int) -> dict:
         """Получение статистики модерации для конкретного модератора"""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Статистика за все время
-            cursor = await db.execute('''
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                # Статистика за все время
+                total_moderated = await conn.fetchval('''
+                    SELECT COUNT(*) FROM daily_tasks
+                    WHERE moderator_comment LIKE $1
+                ''', f'%Одобрено модератором {moderator_id}%') or 0
+
+                # Статистика за сегодня
+                today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                today_moderated = await conn.fetchval('''
+                    SELECT COUNT(*) FROM daily_tasks
+                    WHERE moderator_comment LIKE $1
+                    AND updated_at >= $2
+                ''', f'%Одобрено модератором {moderator_id}%', today_start) or 0
+
+                # Статистика одобренных заданий
+                approved = await conn.fetchval('''
+                    SELECT COUNT(*) FROM daily_tasks
+                    WHERE status = 'approved'
+                    AND moderator_comment LIKE $1
+                ''', f'%Одобрено модератором {moderator_id}%') or 0
+
+                # Статистика отклоненных заданий
+                rejected = await conn.fetchval('''
+                    SELECT COUNT(*) FROM daily_tasks
+                    WHERE status = 'rejected'
+                    AND moderator_comment LIKE $1
+                ''', f'%Отклонено модератором {moderator_id}%') or 0
+
+                # Статистика отклоненных заданий за сегодня
+                today_rejected = await conn.fetchval('''
+                    SELECT COUNT(*) FROM daily_tasks
+                    WHERE status = 'rejected'
+                    AND moderator_comment LIKE $1
+                    AND updated_at >= $2
+                ''', f'%Отклонено модератором {moderator_id}%', today_start) or 0
+
+                return {
+                    'moderator_id': moderator_id,
+                    'total_moderated': total_moderated,
+                    'today_moderated': today_moderated,
+                    'approved': approved,
+                    'rejected': rejected,
+                    'total_tasks': total_moderated + rejected,
+                    'today_tasks': today_moderated + today_rejected
+                }
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Статистика за все время
+                cursor = await db.execute('''
                 SELECT COUNT(*) as total_moderated
                 FROM daily_tasks
                 WHERE moderator_comment LIKE ?
-            ''', (f"Одобрено модератором {moderator_id}%",))
+                ''', (f"Одобрено модератором {moderator_id}%",))
 
-            total_row = await cursor.fetchone()
-            total_moderated = total_row[0] if total_row else 0
+                total_row = await cursor.fetchone()
+                total_moderated = total_row[0] if total_row else 0
 
-            # Статистика за сегодня
-            today_start = int(datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            today_end = today_start + 86400  # 24 часа
+                # Статистика за сегодня
+                today_start = int(datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+                today_end = today_start + 86400  # 24 часа
 
-            cursor = await db.execute('''
-                SELECT COUNT(*) as today_moderated
-                FROM daily_tasks
-                WHERE moderator_comment LIKE ?
-                AND completed_at >= ? AND completed_at < ?
-            ''', (f"Одобрено модератором {moderator_id}%", today_start, today_end))
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as today_moderated
+                    FROM daily_tasks
+                    WHERE moderator_comment LIKE ?
+                    AND completed_at >= ? AND completed_at < ?
+                ''', (f"Одобрено модератором {moderator_id}%", today_start, today_end))
 
-            today_row = await cursor.fetchone()
-            today_moderated = today_row[0] if today_row else 0
+                today_row = await cursor.fetchone()
+                today_moderated = today_row[0] if today_row else 0
 
-            # Статистика отклоненных заданий за все время
-            cursor = await db.execute('''
-                SELECT COUNT(*) as total_rejected
-                FROM daily_tasks
-                WHERE moderator_comment LIKE ?
-            ''', (f"Отклонено модератором {moderator_id}%",))
+                # Статистика отклоненных заданий за все время
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as total_rejected
+                    FROM daily_tasks
+                    WHERE moderator_comment LIKE ?
+                ''', (f"Отклонено модератором {moderator_id}%",))
 
-            rejected_row = await cursor.fetchone()
-            total_rejected = rejected_row[0] if rejected_row else 0
+                rejected_row = await cursor.fetchone()
+                total_rejected = rejected_row[0] if rejected_row else 0
 
-            # Статистика отклоненных заданий за сегодня
-            cursor = await db.execute('''
-                SELECT COUNT(*) as today_rejected
-                FROM daily_tasks
-                WHERE moderator_comment LIKE ?
-                AND completed_at >= ? AND completed_at < ?
-            ''', (f"Отклонено модератором {moderator_id}%", today_start, today_end))
+                # Статистика отклоненных заданий за сегодня
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as today_rejected
+                    FROM daily_tasks
+                    WHERE moderator_comment LIKE ?
+                    AND completed_at >= ? AND completed_at < ?
+                ''', (f"Отклонено модератором {moderator_id}%", today_start, today_end))
 
-            today_rejected_row = await cursor.fetchone()
-            today_rejected = today_rejected_row[0] if today_rejected_row else 0
+                today_rejected_row = await cursor.fetchone()
+                today_rejected = today_rejected_row[0] if today_rejected_row else 0
 
-            return {
-                'total_moderated': total_moderated,
-                'today_moderated': today_moderated,
-                'total_rejected': total_rejected,
-                'today_rejected': today_rejected,
-                'total_tasks': total_moderated + total_rejected,
-                'today_tasks': today_moderated + today_rejected
-            }
+                return {
+                    'total_moderated': total_moderated,
+                    'today_moderated': today_moderated,
+                    'total_rejected': total_rejected,
+                    'today_rejected': today_rejected,
+                    'total_tasks': total_moderated + total_rejected,
+                    'today_tasks': today_moderated + today_rejected
+                }
 
     # Методы для управления модераторами
 
     async def add_moderator(self, telegram_id: int, username: str = None, full_name: str = None) -> bool:
         """Добавление модератора"""
-        async with aiosqlite.connect(self.db_path) as db:
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
             try:
-                current_time = int(datetime.datetime.now().timestamp())
-                await db.execute('''
+                current_time = datetime.datetime.now()
+                await conn.execute('''
                     INSERT INTO moderators (telegram_id, username, full_name, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT(telegram_id) DO UPDATE SET
-                        username = excluded.username,
-                        full_name = excluded.full_name,
-                        is_active = 1,
-                        updated_at = excluded.updated_at
-                ''', (telegram_id, username, full_name, current_time, current_time))
-                await db.commit()
-                logger.info(f"Модератор {telegram_id} добавлен/обновлен")
+                        username = EXCLUDED.username,
+                        full_name = EXCLUDED.full_name,
+                        is_active = TRUE,
+                        updated_at = EXCLUDED.updated_at
+                ''', telegram_id, username, full_name, current_time, current_time)
+                logger.info(f"Модератор {telegram_id} добавлен/обновлен (PostgreSQL)")
                 return True
             except Exception as e:
-                await db.rollback()
                 logger.error(f"Ошибка добавления модератора {telegram_id}: {e}")
                 return False
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                try:
+                    current_time = int(datetime.datetime.now().timestamp())
+                    await db.execute('''
+                        INSERT INTO moderators (telegram_id, username, full_name, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(telegram_id) DO UPDATE SET
+                            username = excluded.username,
+                            full_name = excluded.full_name,
+                            is_active = 1,
+                            updated_at = excluded.updated_at
+                    ''', (telegram_id, username, full_name, current_time, current_time))
+                    await db.commit()
+                    logger.info(f"Модератор {telegram_id} добавлен/обновлен")
+                    return True
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"Ошибка добавления модератора {telegram_id}: {e}")
+                    return False
 
     async def remove_moderator(self, telegram_id: int) -> bool:
         """Удаление модератора"""
-        async with aiosqlite.connect(self.db_path) as db:
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
             try:
-                cursor = await db.execute('DELETE FROM moderators WHERE telegram_id = ?', (telegram_id,))
-                deleted = cursor.rowcount > 0
-                await db.commit()
+                result = await conn.execute('DELETE FROM moderators WHERE telegram_id = $1', telegram_id)
+                deleted = result == 'DELETE 1'
                 if deleted:
-                    logger.info(f"Модератор {telegram_id} удален")
+                    logger.info(f"Модератор {telegram_id} удален (PostgreSQL)")
                 return deleted
             except Exception as e:
-                await db.rollback()
                 logger.error(f"Ошибка удаления модератора {telegram_id}: {e}")
                 return False
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                try:
+                    cursor = await db.execute('DELETE FROM moderators WHERE telegram_id = ?', (telegram_id,))
+                    deleted = cursor.rowcount > 0
+                    await db.commit()
+                    if deleted:
+                        logger.info(f"Модератор {telegram_id} удален")
+                    return deleted
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"Ошибка удаления модератора {telegram_id}: {e}")
+                    return False
 
     async def get_moderators(self, active_only: bool = True) -> list[dict]:
         """Получение списка модераторов"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                if active_only:
+                    rows = await conn.fetch('SELECT * FROM moderators WHERE is_active = TRUE ORDER BY created_at DESC')
+                else:
+                    rows = await conn.fetch('SELECT * FROM moderators ORDER BY created_at DESC')
+                return [dict(row) for row in rows]
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
 
-            query = 'SELECT * FROM moderators'
-            params = []
+                query = 'SELECT * FROM moderators'
+                params = []
 
-            if active_only:
-                query += ' WHERE is_active = 1'
+                if active_only:
+                    query += ' WHERE is_active = 1'
 
-            query += ' ORDER BY created_at DESC'
+                query += ' ORDER BY created_at DESC'
 
-            cursor = await db.execute(query, params)
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
 
     async def get_moderator_by_telegram_id(self, telegram_id: int) -> Optional[dict]:
         """Получение модератора по Telegram ID"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('SELECT * FROM moderators WHERE telegram_id = ?', (telegram_id,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                row = await conn.fetchrow(
+                    'SELECT * FROM moderators WHERE telegram_id = $1',
+                    telegram_id
+                )
+                return dict(row) if row else None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('SELECT * FROM moderators WHERE telegram_id = ?', (telegram_id,))
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 
     # Методы для управления блогерами
 
     async def add_blogger(self, telegram_id: int, referral_code: str, username: str = None, full_name: str = None) -> bool:
         """Добавление блогера"""
-        async with aiosqlite.connect(self.db_path) as db:
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
             try:
-                current_time = int(datetime.datetime.now().timestamp())
-                await db.execute('''
+                current_time = datetime.datetime.now()
+                await conn.execute('''
                     INSERT INTO bloggers (telegram_id, username, full_name, referral_code, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT(telegram_id) DO UPDATE SET
-                        username = excluded.username,
-                        full_name = excluded.full_name,
-                        referral_code = excluded.referral_code,
-                        is_active = 1,
-                        updated_at = excluded.updated_at
-                ''', (telegram_id, username, full_name, referral_code, current_time, current_time))
-                await db.commit()
-                logger.info(f"Блогер {telegram_id} с реферальным кодом {referral_code} добавлен/обновлен")
+                        username = EXCLUDED.username,
+                        full_name = EXCLUDED.full_name,
+                        referral_code = EXCLUDED.referral_code,
+                        is_active = TRUE,
+                        updated_at = EXCLUDED.updated_at
+                ''', telegram_id, username, full_name, referral_code, current_time, current_time)
+                logger.info(f"Блогер {telegram_id} с реферальным кодом {referral_code} добавлен/обновлен (PostgreSQL)")
                 return True
             except Exception as e:
-                await db.rollback()
                 logger.error(f"Ошибка добавления блогера {telegram_id}: {e}")
                 return False
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                try:
+                    current_time = int(datetime.datetime.now().timestamp())
+                    await db.execute('''
+                        INSERT INTO bloggers (telegram_id, username, full_name, referral_code, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(telegram_id) DO UPDATE SET
+                            username = excluded.username,
+                            full_name = excluded.full_name,
+                            referral_code = excluded.referral_code,
+                            is_active = 1,
+                            updated_at = excluded.updated_at
+                    ''', (telegram_id, username, full_name, referral_code, current_time, current_time))
+                    await db.commit()
+                    logger.info(f"Блогер {telegram_id} с реферальным кодом {referral_code} добавлен/обновлен")
+                    return True
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"Ошибка добавления блогера {telegram_id}: {e}")
+                    return False
 
     async def remove_blogger(self, telegram_id: int) -> bool:
         """Удаление блогера"""
-        async with aiosqlite.connect(self.db_path) as db:
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
             try:
-                cursor = await db.execute('DELETE FROM bloggers WHERE telegram_id = ?', (telegram_id,))
-                deleted = cursor.rowcount > 0
-                await db.commit()
+                result = await conn.execute('DELETE FROM bloggers WHERE telegram_id = $1', telegram_id)
+                deleted = result == 'DELETE 1'
                 if deleted:
-                    logger.info(f"Блогер {telegram_id} удален")
+                    logger.info(f"Блогер {telegram_id} удален (PostgreSQL)")
                 return deleted
             except Exception as e:
-                await db.rollback()
                 logger.error(f"Ошибка удаления блогера {telegram_id}: {e}")
                 return False
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                try:
+                    cursor = await db.execute('DELETE FROM bloggers WHERE telegram_id = ?', (telegram_id,))
+                    deleted = cursor.rowcount > 0
+                    await db.commit()
+                    if deleted:
+                        logger.info(f"Блогер {telegram_id} удален")
+                    return deleted
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"Ошибка удаления блогера {telegram_id}: {e}")
+                    return False
 
     async def get_bloggers(self, active_only: bool = True) -> list[dict]:
         """Получение списка блогеров"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                if active_only:
+                    rows = await conn.fetch('SELECT * FROM bloggers WHERE is_active = TRUE ORDER BY created_at DESC')
+                else:
+                    rows = await conn.fetch('SELECT * FROM bloggers ORDER BY created_at DESC')
+                return [dict(row) for row in rows]
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
 
-            query = 'SELECT * FROM bloggers'
-            params = []
+                query = 'SELECT * FROM bloggers'
+                params = []
 
-            if active_only:
-                query += ' WHERE is_active = 1'
+                if active_only:
+                    query += ' WHERE is_active = 1'
 
-            query += ' ORDER BY created_at DESC'
+                query += ' ORDER BY created_at DESC'
 
-            cursor = await db.execute(query, params)
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
 
     async def get_blogger_by_telegram_id(self, telegram_id: int) -> Optional[dict]:
         """Получение блогера по Telegram ID"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('SELECT * FROM bloggers WHERE telegram_id = ?', (telegram_id,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                row = await conn.fetchrow(
+                    'SELECT * FROM bloggers WHERE telegram_id = $1',
+                    telegram_id
+                )
+                return dict(row) if row else None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('SELECT * FROM bloggers WHERE telegram_id = ?', (telegram_id,))
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 
     async def get_blogger_by_referral_code(self, referral_code: str) -> Optional[dict]:
         """Получение блогера по реферальному коду"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('SELECT * FROM bloggers WHERE referral_code = ? AND is_active = 1', (referral_code,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+        if self.use_postgres:
+            conn = await _get_postgres_connection()
+            try:
+                row = await conn.fetchrow(
+                    'SELECT * FROM bloggers WHERE referral_code = $1 AND is_active = TRUE',
+                    referral_code
+                )
+                return dict(row) if row else None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('SELECT * FROM bloggers WHERE referral_code = ? AND is_active = 1', (referral_code,))
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 
     # Методы для получения списков ID для авторизации
 

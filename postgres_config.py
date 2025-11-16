@@ -75,18 +75,23 @@ def get_postgres_connection():
     Создание подключения к PostgreSQL через psycopg2.
     Согласно документации Timeweb использует SSL с сертификатом.
     """
-    # Убеждаемся что сертификат установлен (для verify-full режима)
-    if POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
-        ensure_ssl_certificate()
-    
     conn_params = {
         "host": POSTGRES_HOST,
         "port": POSTGRES_PORT,
         "database": POSTGRES_DATABASE,
         "user": POSTGRES_USER,
         "password": POSTGRES_PASSWORD,
-        "sslmode": POSTGRES_SSL_MODE,
     }
+    
+    # Обрабатываем SSL только если он не отключен
+    ssl_mode_lower = POSTGRES_SSL_MODE.lower() if POSTGRES_SSL_MODE else "disable"
+    
+    if ssl_mode_lower != "disable":
+        # Убеждаемся что сертификат установлен (для verify-full режима)
+        if ssl_mode_lower in ("verify-full", "verify-ca"):
+            ensure_ssl_certificate()
+        
+        conn_params["sslmode"] = POSTGRES_SSL_MODE
     
     # Добавляем sslrootcert только если путь указан и файл существует
     if POSTGRES_SSL_ROOT_CERT and POSTGRES_SSL_ROOT_CERT.strip():
@@ -94,9 +99,12 @@ def get_postgres_connection():
         if os.path.exists(expanded_cert_path):
             conn_params["sslrootcert"] = expanded_cert_path
             logger.debug(f"Используется SSL сертификат: {expanded_cert_path}")
-        elif POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
+        elif ssl_mode_lower in ("verify-full", "verify-ca"):
             logger.warning(f"⚠️ SSL сертификат не найден: {expanded_cert_path}")
             logger.warning("Подключение может не работать. Попробуйте установить сертификат вручную.")
+    else:
+        # SSL отключен - не добавляем параметры SSL вообще
+        logger.debug("SSL отключен, пропускаем проверку сертификата")
     
     return psycopg2.connect(**conn_params)
 
@@ -144,60 +152,61 @@ def get_postgres_connection_params():
     logger.info(f"Подключение к PostgreSQL: host={POSTGRES_HOST}, port={POSTGRES_PORT}, database={POSTGRES_DATABASE}, user={POSTGRES_USER}, ssl_mode={POSTGRES_SSL_MODE}")
     logger.debug(f"Длина пароля: {len(POSTGRES_PASSWORD)} символов")
     
+    # Обрабатываем SSL только если он не отключен
+    ssl_mode_lower = POSTGRES_SSL_MODE.lower() if POSTGRES_SSL_MODE else "disable"
+    
+    if ssl_mode_lower == "disable":
+        # SSL отключен - не добавляем SSL параметры вообще
+        logger.debug("SSL отключен, пропускаем проверку сертификата")
+        return params
+    
     # Убеждаемся что сертификат установлен (для verify-full режима)
-    if POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
+    if ssl_mode_lower in ("verify-full", "verify-ca"):
         ensure_ssl_certificate()
     
     # Добавляем SSL параметры для asyncpg
     # asyncpg требует объект SSLContext или специальные значения
     # Согласно документации Timeweb рекомендуется использовать verify-full с сертификатом
-    if POSTGRES_SSL_MODE:
-        ssl_mode_lower = POSTGRES_SSL_MODE.lower()
-        
-        if ssl_mode_lower == "disable":
-            # Отключаем SSL (не рекомендуется для Timeweb)
-            params["ssl"] = False
-            logger.warning("⚠️ SSL отключен. Для Timeweb рекомендуется использовать verify-full или require.")
-        elif ssl_mode_lower == "require":
-            # Требуем SSL без проверки сертификата
-            params["ssl"] = "require"
-            logger.info("Используется SSL режим: require (без проверки сертификата)")
-        elif ssl_mode_lower == "prefer":
-            # Предпочитаем SSL, но не требуем
-            params["ssl"] = "prefer"
-        elif ssl_mode_lower == "allow":
-            # Разрешаем SSL
-            params["ssl"] = "allow"
-        elif ssl_mode_lower in ("verify-ca", "verify-full"):
-            # Требуем SSL с проверкой сертификата (рекомендуется для Timeweb)
-            ssl_context = ssl.create_default_context()
-            if POSTGRES_SSL_ROOT_CERT and POSTGRES_SSL_ROOT_CERT.strip():
-                expanded_cert_path = os.path.expanduser(POSTGRES_SSL_ROOT_CERT)
-                if os.path.exists(expanded_cert_path):
-                    try:
-                        ssl_context.load_verify_locations(expanded_cert_path)
-                        logger.info(f"✅ SSL сертификат загружен: {expanded_cert_path}")
-                        params["ssl"] = ssl_context
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка загрузки SSL сертификата: {e}")
-                        logger.warning("Используется режим 'require' вместо 'verify-full'")
-                        params["ssl"] = "require"
-                else:
-                    # Если файл сертификата не найден, используем require вместо verify
-                    logger.warning(f"⚠️ Файл сертификата не найден: {expanded_cert_path}")
+    if ssl_mode_lower == "require":
+        # Требуем SSL без проверки сертификата
+        params["ssl"] = "require"
+        logger.info("Используется SSL режим: require (без проверки сертификата)")
+    elif ssl_mode_lower == "prefer":
+        # Предпочитаем SSL, но не требуем
+        params["ssl"] = "prefer"
+    elif ssl_mode_lower == "allow":
+        # Разрешаем SSL
+        params["ssl"] = "allow"
+    elif ssl_mode_lower in ("verify-ca", "verify-full"):
+        # Требуем SSL с проверкой сертификата (рекомендуется для Timeweb)
+        ssl_context = ssl.create_default_context()
+        if POSTGRES_SSL_ROOT_CERT and POSTGRES_SSL_ROOT_CERT.strip():
+            expanded_cert_path = os.path.expanduser(POSTGRES_SSL_ROOT_CERT)
+            if os.path.exists(expanded_cert_path):
+                try:
+                    ssl_context.load_verify_locations(expanded_cert_path)
+                    logger.info(f"✅ SSL сертификат загружен: {expanded_cert_path}")
+                    params["ssl"] = ssl_context
+                except Exception as e:
+                    logger.error(f"❌ Ошибка загрузки SSL сертификата: {e}")
                     logger.warning("Используется режим 'require' вместо 'verify-full'")
-                    logger.info("Попробуйте установить сертификат вручную:")
-                    logger.info(f"  mkdir -p {os.path.dirname(expanded_cert_path)}")
-                    logger.info(f"  curl -o {expanded_cert_path} {TIMEWEB_CERT_URL}")
-                    logger.info(f"  chmod 0600 {expanded_cert_path}")
                     params["ssl"] = "require"
             else:
-                logger.warning("Путь к SSL сертификату не указан. Используется режим 'require'")
+                # Если файл сертификата не найден, используем require вместо verify
+                logger.warning(f"⚠️ Файл сертификата не найден: {expanded_cert_path}")
+                logger.warning("Используется режим 'require' вместо 'verify-full'")
+                logger.info("Попробуйте установить сертификат вручную:")
+                logger.info(f"  mkdir -p {os.path.dirname(expanded_cert_path)}")
+                logger.info(f"  curl -o {expanded_cert_path} {TIMEWEB_CERT_URL}")
+                logger.info(f"  chmod 0600 {expanded_cert_path}")
                 params["ssl"] = "require"
         else:
-            # Неизвестный режим SSL - используем require по умолчанию
-            logger.warning(f"⚠️ Неизвестный режим SSL: {POSTGRES_SSL_MODE}. Используется режим 'require'")
+            logger.warning("Путь к SSL сертификату не указан. Используется режим 'require'")
             params["ssl"] = "require"
+    else:
+        # Неизвестный режим SSL - используем require по умолчанию
+        logger.warning(f"⚠️ Неизвестный режим SSL: {POSTGRES_SSL_MODE}. Используется режим 'require'")
+        params["ssl"] = "require"
     
     return params
 
@@ -222,8 +231,9 @@ def validate_postgres_config():
         logger.error("Проверьте файл .env и убедитесь что все переменные установлены.")
         raise ValueError(error_msg)
 
-    # Проверка и установка SSL сертификата (только если SSL режим требует сертификат)
-    if POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
+    # Проверка и установка SSL сертификата (только если SSL режим требует сертификат и не отключен)
+    ssl_mode_lower = POSTGRES_SSL_MODE.lower() if POSTGRES_SSL_MODE else "disable"
+    if ssl_mode_lower not in ("disable",) and POSTGRES_SSL_MODE in ("verify-full", "verify-ca"):
         cert_path = POSTGRES_SSL_ROOT_CERT
         if cert_path and cert_path.strip():
             expanded_cert_path = os.path.expanduser(cert_path)
