@@ -29,8 +29,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN cd "Player Card Design" && npm install && cd ..
 
 # Устанавливаем Google Chrome для Puppeteer
-RUN wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get update \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    && curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb \
     && apt-get install -y --no-install-recommends /tmp/chrome.deb \
     && rm -f /tmp/chrome.deb \
     && rm -rf /var/lib/apt/lists/*
