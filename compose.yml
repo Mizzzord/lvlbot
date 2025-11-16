@@ -35,14 +35,13 @@ services:
       - ./logs:/app/logs
     
     # Ограничения ресурсов
+    # Примечание: reservations не поддерживается в docker-compose 3.9
+    # Для использования reservations обновите до docker-compose версии 3.8+ или используйте docker stack deploy
     deploy:
       resources:
         limits:
           cpus: '2.0'
           memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
     
     # Healthcheck
     healthcheck:

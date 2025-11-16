@@ -34,14 +34,12 @@ services:
       - ./logs:/app/logs
     
     # Ограничения ресурсов для production
+    # Примечание: reservations не поддерживается в docker-compose 3.9
     deploy:
       resources:
         limits:
           cpus: '4.0'
           memory: 4G
-        reservations:
-          cpus: '1.0'
-          memory: 1G
     
     # Healthcheck
     healthcheck:
