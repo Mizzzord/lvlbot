@@ -20,10 +20,13 @@ const PlayerCard = ({ data }) => {
   };
 
   const getStatColor = (value) => {
-    if (value >= 80) return '#4ade80'; // зеленый
-    if (value >= 60) return '#60a5fa'; // синий
-    if (value >= 40) return '#fbbf24'; // желтый
-    return '#f87171'; // красный
+    // Все плашки характеристик зеленого цвета
+    // Градиент от темно-зеленого к ярко-зеленому
+    const progress = value / 100;
+    const r = Math.floor(34 + (76 * progress));   // 34-110
+    const g = Math.floor(139 + (116 * progress)); // 139-255
+    const b = Math.floor(34 + (76 * progress));    // 34-110
+    return `rgb(${r}, ${g}, ${b})`;
   };
 
   const cardStyle = {
@@ -141,7 +144,7 @@ const PlayerCard = ({ data }) => {
     height: '30px',
     background: '#1e1e1e',
     borderRadius: '15px',
-    border: '2px solid #b0c4de',
+    border: '2px solid #228b22', // Зеленый цвет для рамки
     overflow: 'hidden',
     position: 'relative'
   };

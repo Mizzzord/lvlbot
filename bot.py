@@ -644,24 +644,21 @@ async def create_player_card_image(photo_path: str, nickname: str, experience: i
             bar_x = 60
             bar_y = stat_y + 35
 
-            # Фон полосы с рамкой
+            # Фон полосы с зеленой рамкой
+            green_outline = (34, 139, 34)  # Зеленый цвет для рамки
             draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height],
-                         fill=(30, 30, 30), outline=stat_color, width=2)
+                         fill=(30, 30, 30), outline=green_outline, width=2)
 
-            # Заполнение полосы с градиентом
+            # Заполнение полосы с зеленым градиентом
             fill_width = int(bar_width * stat_value / 100)
             if fill_width > 0:
-                # Градиент для полосы прогресса
+                # Зеленый градиент для полосы прогресса
                 for x in range(bar_x + 2, bar_x + fill_width - 2):
                     progress = (x - bar_x) / bar_width
-                    if stat_value > 50:
-                        r = int(100 + (155 * progress))
-                        g = int(100 + (115 * progress))
-                        b = int(255 - (155 * progress))
-                    else:
-                        r = int(255 - (155 * progress))
-                        g = int(100 + (155 * progress))
-                        b = int(100)
+                    # Зеленые оттенки: от темно-зеленого к ярко-зеленому
+                    r = int(34 + (76 * progress))   # 34-110 (темно-зеленый к ярко-зеленому)
+                    g = int(139 + (116 * progress)) # 139-255 (средне-зеленый к ярко-зеленому)
+                    b = int(34 + (76 * progress))    # 34-110
                     draw.rectangle([x, bar_y + 2, x + 1, bar_y + bar_height - 2], fill=(r, g, b))
 
         # Нижний декор
@@ -693,6 +690,94 @@ async def create_player_card_image(photo_path: str, nickname: str, experience: i
         import traceback
         logger.error(traceback.format_exc())
         return None
+
+async def update_player_card(user_id: int) -> bool:
+    """
+    Обновляет карточку игрока после изменения опыта или характеристик
+    
+    Args:
+        user_id: ID пользователя
+        
+    Returns:
+        bool: True если карточка успешно обновлена, False в противном случае
+    """
+    try:
+        # Получаем данные игрока
+        player_stats = await db.get_player_stats(user_id)
+        if not player_stats or not player_stats.photo_path:
+            logger.warning(f"Не удалось обновить карточку для пользователя {user_id}: нет фото или статистики")
+            return False
+        
+        # Получаем статистику пользователя
+        user_stats = await db.get_user_stats(user_id)
+        if not user_stats:
+            logger.warning(f"Не удалось обновить карточку для пользователя {user_id}: нет статистики пользователя")
+            return False
+        
+        # Получаем позицию в рейтинге
+        rating_position = await db.get_user_rating_position(user_id)
+        
+        # Формируем данные для карточки
+        stats = {
+            'strength': player_stats.strength,
+            'agility': player_stats.agility,
+            'endurance': player_stats.endurance,
+            'intelligence': player_stats.intelligence,
+            'charisma': player_stats.charisma
+        }
+        
+        nickname = player_stats.nickname or f"Player_{user_id}"
+        experience = user_stats.experience
+        level = user_stats.level
+        rank = user_stats.rank.value
+        
+        # Удаляем старую карточку, если она существует
+        if player_stats.card_image_path and os.path.exists(player_stats.card_image_path):
+            try:
+                os.remove(player_stats.card_image_path)
+                logger.info(f"Удалена старая карточка: {player_stats.card_image_path}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить старую карточку: {e}")
+        
+        # Создаем новую карточку
+        try:
+            # Пробуем создать через Node.js сервис
+            card_image_path = await create_player_card_image_nodejs(
+                player_stats.photo_path,
+                nickname,
+                experience,
+                level,
+                rank,
+                rating_position,
+                stats
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось создать карточку через Node.js: {e}, используем Python версию")
+            # Используем Python версию как fallback
+            card_image_path = await create_player_card_image(
+                player_stats.photo_path,
+                nickname,
+                experience,
+                stats,
+                level,
+                rank,
+                rating_position
+            )
+        
+        if card_image_path:
+            # Обновляем путь к карточке в базе данных
+            await db.update_player_card_path(user_id, card_image_path)
+            logger.info(f"Карточка игрока обновлена для пользователя {user_id}: {card_image_path}")
+            return True
+        else:
+            logger.error(f"Не удалось создать карточку для пользователя {user_id}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении карточки игрока для пользователя {user_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 def create_goal_confirmation_keyboard() -> InlineKeyboardMarkup:
     """Создание inline клавиатуры для подтверждения цели"""
@@ -774,6 +859,30 @@ def validate_height(height_str: str) -> Optional[float]:
         return None
     except ValueError:
         return None
+
+def split_long_message(text: str, max_length: int = 4000) -> list[str]:
+    """Разбивает длинный текст на части для отправки в Telegram"""
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    current_part = ""
+    lines = text.split('\n')
+    
+    for line in lines:
+        # Если добавление строки превысит лимит, сохраняем текущую часть
+        if len(current_part) + len(line) + 1 > max_length:
+            if current_part:
+                parts.append(current_part.rstrip())
+            current_part = line + '\n'
+        else:
+            current_part += line + '\n'
+    
+    # Добавляем последнюю часть
+    if current_part:
+        parts.append(current_part.rstrip())
+    
+    return parts
 
 def validate_weight(weight_str: str) -> Optional[float]:
     """Валидация веса (в кг)"""
@@ -2181,15 +2290,20 @@ async def handle_get_task(message: Message, state: FSMContext):
 
     task_id = await db.save_daily_task(task)
 
-    await message.answer(
+    task_message = (
         f"🎯 <b>Новое задание получено!</b>\n\n"
         f"📝 <b>Задание:</b>\n{task_description}\n\n"
         f"⏰ <b>Время на выполнение:</b> 24 часа\n\n"
         f"📸 <b>Для сдачи задания:</b> отправьте фото или видео выполнения\n\n"
-        f"Удачи в выполнении!",
-        parse_mode="HTML",
-        reply_markup=create_main_menu_keyboard()
+        f"Удачи в выполнении!"
     )
+    
+    # Разбиваем длинное сообщение на части, если необходимо
+    message_parts = split_long_message(task_message)
+    for i, part in enumerate(message_parts):
+        # Клавиатуру добавляем только к последней части
+        reply_markup = create_main_menu_keyboard() if i == len(message_parts) - 1 else None
+        await message.answer(part, parse_mode="HTML", reply_markup=reply_markup)
 
 @router.message(F.text == "📋 Активные задания")
 async def handle_active_tasks(message: Message, state: FSMContext):
@@ -2209,7 +2323,37 @@ async def handle_active_tasks(message: Message, state: FSMContext):
     # Получаем активное задание
     active_task = await db.get_active_daily_task(user_id)
 
+    # Если нет активного задания, проверяем недавно проверенные задания
     if not active_task:
+        recently_checked_task = await db.get_recently_checked_task(user_id, hours=24)
+        if recently_checked_task:
+            if recently_checked_task.status == TaskStatus.APPROVED:
+                task_message = (
+                    f"✅ <b>Ваше задание было одобрено!</b>\n\n"
+                    f"📝 <b>Задание:</b>\n{recently_checked_task.task_description}\n\n"
+                    f"🎉 Задание успешно выполнено и одобрено модератором!\n\n"
+                    f"Получите новое задание для продолжения!"
+                )
+                message_parts = split_long_message(task_message)
+                for i, part in enumerate(message_parts):
+                    reply_markup = create_main_menu_keyboard() if i == len(message_parts) - 1 else None
+                    await message.answer(part, parse_mode="HTML", reply_markup=reply_markup)
+            elif recently_checked_task.status == TaskStatus.REJECTED:
+                reason_text = ""
+                if recently_checked_task.moderator_comment:
+                    reason_text = f"\n\n📋 <b>Причина:</b>\n{recently_checked_task.moderator_comment}"
+                task_message = (
+                    f"❌ <b>Ваше задание было отклонено</b>\n\n"
+                    f"📝 <b>Задание:</b>\n{recently_checked_task.task_description}{reason_text}\n\n"
+                    f"💡 Попробуйте выполнить задание лучше и отправьте снова!\n\n"
+                    f"Получите новое задание!"
+                )
+                message_parts = split_long_message(task_message)
+                for i, part in enumerate(message_parts):
+                    reply_markup = create_main_menu_keyboard() if i == len(message_parts) - 1 else None
+                    await message.answer(part, parse_mode="HTML", reply_markup=reply_markup)
+            return
+        
         await message.answer(
             "📋 <b>Активных заданий нет</b>\n\n"
             "У вас нет активных заданий. Получите новое задание!",
@@ -2236,14 +2380,16 @@ async def handle_active_tasks(message: Message, state: FSMContext):
     # Проверяем статус задания
     if active_task.status == TaskStatus.SUBMITTED:
         # Задание отправлено на проверку
-        await message.answer(
+        task_message = (
             f"📋 <b>Ваше активное задание</b>\n\n"
             f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
             f"⏳ <b>Статус:</b> На проверке\n\n"
-            f"Ваше задание отправлено на проверку модератору. Ожидайте результата!",
-            parse_mode="HTML",
-            reply_markup=create_main_menu_keyboard()
+            f"Ваше задание отправлено на проверку модератору. Ожидайте результата!"
         )
+        message_parts = split_long_message(task_message)
+        for i, part in enumerate(message_parts):
+            reply_markup = create_main_menu_keyboard() if i == len(message_parts) - 1 else None
+            await message.answer(part, parse_mode="HTML", reply_markup=reply_markup)
         return
 
     # Задание ожидает выполнения
@@ -2251,15 +2397,17 @@ async def handle_active_tasks(message: Message, state: FSMContext):
     hours = time_left // 3600
     minutes = (time_left % 3600) // 60
 
-    await message.answer(
+    task_message = (
         f"📋 <b>Ваше активное задание</b>\n\n"
         f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
         f"⏰ <b>Осталось времени:</b> {hours}ч {minutes}мин\n"
         f"📸 <b>Статус:</b> Ожидает выполнения\n\n"
-        f"Для сдачи задания отправьте фото или видео выполнения в чат!",
-        parse_mode="HTML",
-        reply_markup=create_main_menu_keyboard()
+        f"Для сдачи задания отправьте фото или видео выполнения в чат!"
     )
+    message_parts = split_long_message(task_message)
+    for i, part in enumerate(message_parts):
+        reply_markup = create_main_menu_keyboard() if i == len(message_parts) - 1 else None
+        await message.answer(part, parse_mode="HTML", reply_markup=reply_markup)
 
 @router.message(F.text == "👤 Профиль")
 async def handle_profile(message: Message, state: FSMContext):
@@ -2690,14 +2838,16 @@ async def handle_task_submission(message: Message, state: FSMContext, media_type
         success = await db.submit_daily_task_media(active_task.id, file_name)
 
         if success:
-            await message.answer(
+            task_message = (
                 f"✅ <b>Задание отправлено на проверку!</b>\n\n"
                 f"📝 <b>Задание:</b>\n{active_task.task_description}\n\n"
                 f"⏳ <b>Статус:</b> Ожидает модерации\n\n"
-                f"Вы получите уведомление о результате проверки.",
-                parse_mode="HTML",
-                reply_markup=create_main_menu_keyboard()
+                f"Вы получите уведомление о результате проверки."
             )
+            message_parts = split_long_message(task_message)
+            for i, part in enumerate(message_parts):
+                reply_markup = create_main_menu_keyboard() if i == len(message_parts) - 1 else None
+                await message.answer(part, parse_mode="HTML", reply_markup=reply_markup)
             logger.info(f"Пользователь {user_id} отправил {media_type} для задания {active_task.id}")
         else:
             await message.answer(
@@ -3665,12 +3815,19 @@ async def notification_sender_task():
 
             for notification in notifications:
                 try:
-                    # Отправляем уведомление пользователю
-                    await bot.send_message(
-                        chat_id=notification['user_id'],
-                        text=f"{notification['title']}\n\n{notification['message']}",
-                        parse_mode="HTML"
-                    )
+                    # Формируем полное сообщение
+                    full_message = f"{notification['title']}\n\n{notification['message']}"
+                    
+                    # Разбиваем длинное сообщение на части, если необходимо
+                    message_parts = split_long_message(full_message)
+                    
+                    # Отправляем все части
+                    for part in message_parts:
+                        await bot.send_message(
+                            chat_id=notification['user_id'],
+                            text=part,
+                            parse_mode="HTML"
+                        )
 
                     # Отмечаем уведомление как отправленное
                     await db.mark_notification_sent(notification['id'])

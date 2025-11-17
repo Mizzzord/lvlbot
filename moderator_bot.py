@@ -272,44 +272,122 @@ async def handle_check_task(callback: CallbackQuery, state: FSMContext):
     nickname = task_details['nickname'] or user_name
     task_desc = task_details['task_description']
 
-    text = f"📝 <b>Задание #{task_id}</b>\n\n"
-    text += f"👤 <b>Игрок:</b> {nickname} ({user_name})\n"
-    text += f"🎯 <b>Задание:</b>\n{task_desc}\n\n"
+    # Формируем полный текст задания
+    full_text = f"📝 <b>Задание #{task_id}</b>\n\n"
+    full_text += f"👤 <b>Игрок:</b> {nickname} ({user_name})\n"
+    full_text += f"🎯 <b>Задание:</b>\n{task_desc}\n\n"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_task_{task_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_task_{task_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="back_to_task_list")]
+    ])
 
     # Проверяем, есть ли медиафайл
     media_path = task_details.get('submitted_media_path')
     if media_path and os.path.exists(media_path):
-        text += "📎 <b>Прикреплен файл</b>\n"
+        # Для медиафайлов используем короткий caption (ограничение 1024 символа)
+        # Полное описание отправляем отдельным сообщением
+        short_caption = f"📝 <b>Задание #{task_id}</b>\n👤 <b>Игрок:</b> {nickname}\n📎 <b>Прикреплен файл</b>"
+        
+        # Если caption слишком длинный, обрезаем его
+        if len(short_caption) > 1000:
+            short_caption = short_caption[:997] + "..."
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_task_{task_id}")],
-            [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_task_{task_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="back_to_task_list")]
-        ])
-
-        # Отправляем медиафайл и текст
         try:
             if media_path.endswith(('.jpg', '.jpeg', '.png')):
                 photo = FSInputFile(media_path)
-                await callback.message.answer_photo(photo, caption=text, reply_markup=keyboard)
+                await callback.message.answer_photo(photo, caption=short_caption)
             elif media_path.endswith(('.mp4', '.avi', '.mov')):
                 video = FSInputFile(media_path)
-                await callback.message.answer_video(video, caption=text, reply_markup=keyboard)
+                await callback.message.answer_video(video, caption=short_caption)
             else:
-                await callback.message.edit_text(text + "\n❌ Неподдерживаемый тип файла", reply_markup=keyboard)
+                await callback.message.edit_text(full_text + "\n❌ Неподдерживаемый тип файла", reply_markup=keyboard)
+                return
+            
+            # Отправляем полное описание задания отдельным сообщением
+            # Разбиваем длинный текст на части, если он превышает 4096 символов
+            max_length = 4000  # Оставляем запас
+            if len(full_text) > max_length:
+                # Разбиваем текст на части
+                parts = []
+                current_part = ""
+                lines = full_text.split('\n')
+                
+                for line in lines:
+                    if len(current_part) + len(line) + 1 > max_length:
+                        if current_part:
+                            parts.append(current_part)
+                        current_part = line + '\n'
+                    else:
+                        current_part += line + '\n'
+                
+                if current_part:
+                    parts.append(current_part)
+                
+                # Отправляем первую часть с клавиатурой
+                await callback.message.answer(parts[0], reply_markup=keyboard, parse_mode="HTML")
+                
+                # Отправляем остальные части
+                for part in parts[1:]:
+                    await callback.message.answer(part, parse_mode="HTML")
+            else:
+                # Отправляем полное описание одним сообщением
+                await callback.message.answer(full_text, reply_markup=keyboard, parse_mode="HTML")
+                
         except Exception as e:
             logger.error(f"Ошибка отправки медиафайла: {e}")
-            await callback.message.edit_text(text + "\n❌ Ошибка загрузки файла", reply_markup=keyboard)
+            # Если ошибка, отправляем текст без медиафайла
+            if len(full_text) > 4000:
+                # Разбиваем на части
+                parts = []
+                current_part = ""
+                lines = full_text.split('\n')
+                
+                for line in lines:
+                    if len(current_part) + len(line) + 1 > 4000:
+                        if current_part:
+                            parts.append(current_part)
+                        current_part = line + '\n'
+                    else:
+                        current_part += line + '\n'
+                
+                if current_part:
+                    parts.append(current_part)
+                
+                await callback.message.edit_text(parts[0], reply_markup=keyboard, parse_mode="HTML")
+                for part in parts[1:]:
+                    await callback.message.answer(part, parse_mode="HTML")
+            else:
+                await callback.message.edit_text(full_text + "\n❌ Ошибка загрузки файла", reply_markup=keyboard, parse_mode="HTML")
     else:
-        text += "📎 <b>Файл не прикреплен</b>\n"
+        full_text += "📎 <b>Файл не прикреплен</b>\n"
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_task_{task_id}")],
-            [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_task_{task_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="back_to_task_list")]
-        ])
-
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        # Если текст слишком длинный, разбиваем на части
+        if len(full_text) > 4000:
+            parts = []
+            current_part = ""
+            lines = full_text.split('\n')
+            
+            for line in lines:
+                if len(current_part) + len(line) + 1 > 4000:
+                    if current_part:
+                        parts.append(current_part)
+                    current_part = line + '\n'
+                else:
+                    current_part += line + '\n'
+            
+            if current_part:
+                parts.append(current_part)
+            
+            # Отправляем первую часть с клавиатурой
+            await callback.message.edit_text(parts[0], reply_markup=keyboard, parse_mode="HTML")
+            
+            # Отправляем остальные части
+            for part in parts[1:]:
+                await callback.message.answer(part, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(full_text, reply_markup=keyboard, parse_mode="HTML")
 
 @dp.callback_query(lambda c: c.data.startswith("approve_task_"))
 async def handle_approve_task(callback: CallbackQuery, state: FSMContext):
@@ -477,12 +555,18 @@ async def handle_stats_input(message: Message, state: FSMContext):
                 f"✅ <b>Задание #{task_id} одобрено!</b>\n\n"
                 f"🎉 Начислено: {experience} опыта\n"
                 f"💪 Бонусы к характеристикам:\n{bonus_text}",
-                reply_markup=create_moderator_keyboard()
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 К следующим заданиям", callback_data="back_to_task_list")],
+                    [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_moderator_menu")]
+                ]),
+                parse_mode="HTML"
             )
         else:
             await message.answer(
                 "❌ Ошибка при одобрении задания.",
-                reply_markup=create_moderator_keyboard()
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_task_list")]
+                ])
             )
 
     except ValueError:

@@ -1453,6 +1453,63 @@ class Database:
                     )
                 return None
 
+    async def get_recently_checked_task(self, user_id: int, hours: int = 24) -> Optional[DailyTask]:
+        """Получение недавно проверенного задания пользователя (одобренного или отклоненного за последние N часов)"""
+        if self.use_postgres:
+            conn_string = get_postgres_connection_string()
+            conn = await asyncpg.connect(conn_string)
+            try:
+                time_threshold = int(datetime.datetime.now().timestamp()) - (hours * 3600)
+                row = await conn.fetchrow('''
+                    SELECT * FROM daily_tasks
+                    WHERE user_id = $1 AND status IN ('approved', 'rejected') 
+                    AND completed_at > $2
+                    ORDER BY completed_at DESC
+                    LIMIT 1
+                ''', user_id, time_threshold)
+                
+                if row:
+                    return DailyTask(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        task_description=row['task_description'],
+                        created_at=row['created_at'],
+                        expires_at=row['expires_at'],
+                        status=TaskStatus(row['status']),
+                        completed_at=row['completed_at'],
+                        submitted_media_path=row.get('submitted_media_path'),
+                        moderator_comment=row.get('moderator_comment')
+                    )
+                return None
+            finally:
+                await conn.close()
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                time_threshold = int(datetime.datetime.now().timestamp()) - (hours * 3600)
+                cursor = await db.execute('''
+                    SELECT * FROM daily_tasks
+                    WHERE user_id = ? AND status IN ('approved', 'rejected') 
+                    AND completed_at > ?
+                    ORDER BY completed_at DESC
+                    LIMIT 1
+                ''', (user_id, time_threshold))
+
+                row = await cursor.fetchone()
+                if row:
+                    return DailyTask(
+                        id=row['id'],
+                        user_id=row['user_id'],
+                        task_description=row['task_description'],
+                        created_at=row['created_at'],
+                        expires_at=row['expires_at'],
+                        status=TaskStatus(row['status']),
+                        completed_at=row['completed_at'],
+                        submitted_media_path=row['submitted_media_path'],
+                        moderator_comment=row['moderator_comment']
+                    )
+                return None
+
     async def submit_daily_task_media(self, task_id: int, media_path: str) -> bool:
         """Отправить медиафайл для задания на модерацию"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -2251,6 +2308,18 @@ class Database:
                 # Отправляем уведомление пользователю (после commit)
                 await self.send_task_result_notification(task_id, True, experience_reward, stat_rewards)
 
+                # Обновляем карточку игрока с новым опытом и характеристиками
+                # Используем asyncio.create_task для асинхронного обновления
+                try:
+                    import asyncio
+                    # Создаем задачу для обновления карточки в фоне
+                    asyncio.create_task(self._update_player_card_async(user_id))
+                    logger.info(f"Запущено обновление карточки для пользователя {user_id}")
+                except Exception as e:
+                    logger.warning(f"Не удалось запустить обновление карточки для пользователя {user_id}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+
                 # Удаляем медиафайл для экономии места на сервере
                 if media_path:
                     self._delete_task_media_file(media_path)
@@ -2305,6 +2374,59 @@ class Database:
             new_rank = get_rank_by_experience(experience)  # Получаем ранг по опыту
 
             await db.execute('UPDATE user_stats SET level = ?, rank = ? WHERE user_id = ?', (new_level, new_rank.value, user_id))
+
+    async def update_player_card_path(self, user_id: int, card_image_path: str) -> bool:
+        """Обновление пути к карточке игрока"""
+        try:
+            if self.use_postgres:
+                conn_string = get_postgres_connection_string()
+                conn = await asyncpg.connect(conn_string)
+                try:
+                    await conn.execute('''
+                        UPDATE player_stats
+                        SET card_image_path = $1, updated_at = $2
+                        WHERE user_id = $3
+                    ''', card_image_path, int(datetime.datetime.now().timestamp()), user_id)
+                    return True
+                finally:
+                    await conn.close()
+            else:
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute('''
+                        UPDATE player_stats
+                        SET card_image_path = ?, updated_at = ?
+                        WHERE user_id = ?
+                    ''', (card_image_path, int(datetime.datetime.now().timestamp()), user_id))
+                    await db.commit()
+                    return True
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении пути к карточке для пользователя {user_id}: {e}")
+            return False
+
+    async def _update_player_card_async(self, user_id: int):
+        """Асинхронное обновление карточки игрока (используется lazy import)"""
+        try:
+            # Небольшая задержка чтобы убедиться, что транзакция завершена
+            import asyncio
+            await asyncio.sleep(0.5)
+            
+            # Lazy import чтобы избежать циклической зависимости
+            import sys
+            if 'bot' in sys.modules:
+                from bot import update_player_card
+                result = await update_player_card(user_id)
+                if result:
+                    logger.info(f"Карточка успешно обновлена для пользователя {user_id}")
+                else:
+                    logger.warning(f"Не удалось обновить карточку для пользователя {user_id}")
+            else:
+                logger.warning("Модуль bot не загружен, пропускаем обновление карточки")
+        except ImportError as e:
+            logger.warning(f"Не удалось импортировать update_player_card из bot.py: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении карточки для пользователя {user_id}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def _delete_task_media_file(self, media_path: str) -> bool:
         """Удаление медиафайла задания для экономии места"""
