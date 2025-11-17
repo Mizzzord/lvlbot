@@ -235,12 +235,21 @@ async def improve_goal_with_ai(goal: str) -> str:
         return goal  # Возвращаем оригинальную цель в случае ошибки
 
 
-async def show_main_menu(message: Message):
+async def show_main_menu(message_or_callback):
     """Показать главное меню пользователя"""
     keyboard = create_main_menu_keyboard()
+    
+    # Определяем chat_id в зависимости от типа объекта
+    if hasattr(message_or_callback, 'from_user'):
+        chat_id = message_or_callback.from_user.id
+    elif hasattr(message_or_callback, 'chat'):
+        chat_id = message_or_callback.chat.id
+    else:
+        chat_id = message_or_callback
 
-    await message.answer(
-        "🎮 <b>Главное меню</b>\n\n"
+    await bot.send_message(
+        chat_id=chat_id,
+        text="🎮 <b>Главное меню</b>\n\n"
         "Выберите действие:",
         parse_mode="HTML",
         reply_markup=keyboard
@@ -1376,17 +1385,159 @@ async def handle_back_to_start(callback: CallbackQuery, state: FSMContext):
     """Обработка возврата к началу"""
     await callback.answer()
 
-    # Имитируем команду /start
-    from aiogram.types import Message
-    fake_message = Message(
-        message_id=callback.message.message_id,
-        date=callback.message.date,
-        chat=callback.message.chat,
-        from_user=callback.from_user,
-        text="/start"
-    )
+    # Вызываем cmd_start напрямую с правильным контекстом
+    telegram_id = callback.from_user.id
+    
+    # Проверяем, есть ли уже пользователь в базе
+    existing_user = await db.get_user(telegram_id)
 
-    await cmd_start(fake_message, state)
+    if existing_user:
+        # Сначала проверяем активную подписку (может быть выдана администратором)
+        active_subscription = await db.get_active_subscription(telegram_id)
+        
+        # Проверяем, есть ли карточка игрока
+        player_stats = await db.get_player_stats(telegram_id)
+        
+        # Если есть активная подписка
+        if active_subscription:
+            end_date = datetime.datetime.fromtimestamp(active_subscription.end_date).strftime('%d.%m.%Y')
+            
+            if player_stats:
+                # У пользователя есть карточка - показываем кнопку "Профиль"
+                user_statistics = await db.get_user_stats(telegram_id)
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"💎 <b>Подписка активна до {end_date}</b>\n\n"
+                    f"🎮 Ваша игровая карточка активна!\n\n"
+                    f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
+                    f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
+                    f"Готов продолжить приключения?",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="👤 Профиль", callback_data="go_to_profile")]
+                    ])
+                )
+            else:
+                # У пользователя нет карточки - показываем кнопку "Продолжить путь"
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"Привет, {existing_user.name}! 👋\n\n"
+                    f"💎 <b>Подписка активна до {end_date}</b>\n\n"
+                    f"🎯 Чтобы начать пользоваться ботом, нужно загрузить своё фото и получить характеристики персонажа.\n\n"
+                    f"Готов продолжить?",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🚀 Продолжить путь", callback_data="continue_path")]
+                    ])
+                )
+            return
+        
+        # Определяем статус регистрации
+        reg_status = get_registration_status(existing_user)
+
+        if reg_status['status'] == 'complete':
+            # Пользователь полностью зарегистрирован и имеет активную подписку
+            referral_text = f"📢 Реферальный код: {existing_user.referral_code}\n" if existing_user.referral_code else ""
+            goal_text = f"🎯 Цель: {existing_user.goal}\n" if existing_user.goal else ""
+
+            # Проверяем статус подписки
+            subscription_text = ""
+            if existing_user.subscription_active and existing_user.subscription_end:
+                end_date = datetime.datetime.fromtimestamp(existing_user.subscription_end).strftime('%d.%m.%Y')
+                subscription_text = f"💎 Подписка активна до {end_date}\n"
+            else:
+                subscription_text = "💎 Подписка: Не активна\n"
+
+            if player_stats:
+                # У пользователя есть карточка игрока - показываем главное меню
+                user_statistics = await db.get_user_stats(telegram_id)
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"🎮 Ваша игровая карточка активна!\n\n"
+                    f"🏆 Ник: {player_stats.nickname} | ⭐ Опыт: {user_statistics.experience if user_statistics else 0}\n"
+                    f"📊 Уровень: {user_statistics.level if user_statistics else 1} | 🏅 Ранг: {user_statistics.rank.value if user_statistics else 'F'}\n\n"
+                    f"Готов продолжить приключения?",
+                    parse_mode="HTML"
+                )
+                await state.set_state(UserRegistration.main_menu)
+                await show_main_menu(telegram_id)
+            else:
+                # У пользователя нет карточки - показываем обычное приветствие
+                stats_text = ""
+                if player_stats:
+                    stats_text = (
+                        f"🎮 <b>Карточка игрока: {player_stats.nickname}</b>\n"
+                        f"⭐ Опыт: {player_stats.experience}\n\n"
+                        f"🏆 <b>Характеристики:</b>\n"
+                        f"💪 Сила: {player_stats.strength}/100\n"
+                        f"🤸 Ловкость: {player_stats.agility}/100\n"
+                        f"🏃 Выносливость: {player_stats.endurance}/100\n"
+                        f"🧠 Интеллект: {player_stats.intelligence}/100\n"
+                        f"✨ Харизма: {player_stats.charisma}/100\n"
+                    )
+
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"С возвращением, {existing_user.name}! 👋\n\n"
+                    f"Ты уже в нашей команде изменений!\n\n"
+                    f"👤 Имя: {existing_user.name}\n"
+                    f"📅 Дата рождения: {existing_user.birth_date.strftime('%d.%m.%Y') if existing_user.birth_date else 'Не указана'}\n"
+                    f"📏 Рост: {existing_user.height} см\n"
+                    f"⚖️ Вес: {existing_user.weight} кг\n"
+                    f"🏙️ Город: {existing_user.city}\n"
+                    f"{referral_text}"
+                    f"{goal_text}"
+                    f"{subscription_text}"
+                    f"{stats_text}\n",
+                    parse_mode="HTML"
+                )
+        elif reg_status['status'] == 'paid_pending':
+            # Регистрация завершена, но подписка не оплачена
+            await bot.send_message(
+                chat_id=telegram_id,
+                text=f"С возвращением, {existing_user.name}! 👋\n\n"
+                f"📋 Ваша регистрация завершена, но подписка не активна.\n\n"
+                f"🎯 Цель: {existing_user.goal}\n\n"
+                f"Хотите продолжить с оплатой подписки?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💳 Оплатить подписку", callback_data="continue_payment")],
+                    [InlineKeyboardButton(text="ℹ️ Проверить статус", callback_data="check_payment_status")]
+                ])
+            )
+        elif reg_status['status'] == 'incomplete':
+            # Регистрация не завершена - предлагаем продолжить или начать заново
+            keyboard_buttons = [
+                [InlineKeyboardButton(text="▶️ Продолжить регистрацию", callback_data="resume_registration")]
+            ]
+
+            if reg_status['can_restart']:
+                keyboard_buttons.append(
+                    [InlineKeyboardButton(text="🔄 Начать заново", callback_data="restart_registration")]
+                )
+
+            await bot.send_message(
+                chat_id=telegram_id,
+                text=f"Привет, {callback.from_user.first_name or 'друг'}! 👋\n\n"
+                f"📝 Кажется, вы не завершили регистрацию.\n"
+                f"🔍 Статус: {reg_status['message']}\n\n"
+                f"Что вы хотите сделать?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+            )
+    else:
+        # Получаем имя пользователя из Telegram
+        user_name = callback.from_user.first_name or "друг"
+
+        # Отправляем приветственное мотивационное сообщение с кнопкой "Продолжить"
+        await state.set_state(UserRegistration.waiting_for_start_confirmation)
+        await bot.send_message(
+            chat_id=telegram_id,
+            text=f"Привет, {user_name}! 👋 Я GoPrime — твой личный мотивационный помощник в Telegram. Я помогу тебе достигать целей шаг за шагом: каждый день буду предлагать простые, но мощные задания, адаптированные под твои приоритеты — фитнес, обучение, карьера, хобби или что-то своё. Расскажи о своей главной цели, и мы сразу начнём! Готов к первым шагам к успеху? 🚀",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="▶️ Продолжить", callback_data="start_registration")]
+            ])
+        )
 
 @router.callback_query(lambda c: c.data == "cancel_registration")
 async def handle_cancel_registration(callback: CallbackQuery, state: FSMContext):
@@ -1851,9 +2002,9 @@ async def handle_subscription_confirmation(callback: CallbackQuery, state: FSMCo
         
     else:
         logger.error(f"Не удалось создать платеж для пользователя {user_id}")
-        await callback.message.answer(
-            "❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.",
-            reply_markup=None
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text="❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку."
         )
 
 @router.callback_query(UserRegistration.waiting_for_payment, lambda c: c.data.startswith("check_payment_"))
@@ -3260,8 +3411,9 @@ async def handle_change_goal(callback: CallbackQuery, state: FSMContext):
     """Обработка смены цели"""
     await callback.answer()
 
-    await callback.message.answer(
-        "🎯 <b>Смена цели</b>\n\n"
+    await bot.send_message(
+        chat_id=callback.from_user.id,
+        text="🎯 <b>Смена цели</b>\n\n"
         "Расскажите о вашей новой цели (минимум 3 символа):",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -3319,8 +3471,10 @@ async def process_goal_change_confirmation(callback: CallbackQuery, state: FSMCo
             await db.update_user_field(user_id, 'goal', goal)
             logger.info(f"Цель пользователя {user_id} обновлена на: '{goal}'")
 
-            await callback.message.edit_text(
-                f"✅ <b>Цель успешно обновлена!</b>\n\n"
+            await bot.edit_message_text(
+                chat_id=callback.from_user.id,
+                message_id=callback.message.message_id,
+                text=f"✅ <b>Цель успешно обновлена!</b>\n\n"
                 f"🎯 <b>Ваша новая цель:</b>\n"
                 f"<i>{goal}</i>\n\n"
                 f"Теперь вы можете получать персонализированные задания по этой цели.",
@@ -3329,11 +3483,13 @@ async def process_goal_change_confirmation(callback: CallbackQuery, state: FSMCo
 
             # Очищаем состояние и возвращаемся в главное меню
             await state.clear()
-            await show_main_menu(callback.message)
+            await show_main_menu(callback.from_user.id)
         else:
             logger.error(f"Пользователь {user_id} не найден при обновлении цели")
-            await callback.message.edit_text(
-                "❌ <b>Ошибка обновления цели</b>\n\n"
+            await bot.edit_message_text(
+                chat_id=callback.from_user.id,
+                message_id=callback.message.message_id,
+                text="❌ <b>Ошибка обновления цели</b>\n\n"
                 "Попробуйте позже или обратитесь в поддержку.",
                 parse_mode="HTML"
             )
@@ -3345,8 +3501,10 @@ async def process_goal_change_confirmation(callback: CallbackQuery, state: FSMCo
         original_goal = data.get('goal', '')
 
         # Отправляем сообщение о том, что ИИ работает
-        await callback.message.edit_text(
-            f"🎯 Ваша цель:\n\n<i>{original_goal}</i>\n\n"
+        await bot.edit_message_text(
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text=f"🎯 Ваша цель:\n\n<i>{original_goal}</i>\n\n"
             f"🤖 Улучшаю формулировку с помощью ИИ...",
             reply_markup=None
         )
@@ -3359,8 +3517,10 @@ async def process_goal_change_confirmation(callback: CallbackQuery, state: FSMCo
         await state.update_data(goal=improved_goal)
 
         # Показываем улучшенную цель с той же клавиатурой
-        await callback.message.edit_text(
-            f"🎯 Улучшенная цель:\n\n<i>{improved_goal}</i>\n\n"
+        await bot.edit_message_text(
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text=f"🎯 Улучшенная цель:\n\n<i>{improved_goal}</i>\n\n"
             f"Теперь лучше звучит? Что скажете?",
             reply_markup=create_goal_confirmation_keyboard()
         )
@@ -3369,8 +3529,10 @@ async def process_goal_change_confirmation(callback: CallbackQuery, state: FSMCo
         # Возвращаемся к вводу цели
         logger.info(f"Пользователь {user_id} выбрал редактирование цели при смене")
         await state.set_state(UserRegistration.changing_goal)
-        await callback.message.edit_text(
-            "🎯 Хорошо, давайте переформулируем цель.\n\n"
+        await bot.edit_message_text(
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text="🎯 Хорошо, давайте переформулируем цель.\n\n"
             "Расскажите о вашей новой цели:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Отмена", callback_data="profile")]
