@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import date
 from typing import Optional
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType, Challenge, ChallengeSubmission, ChallengeStatus, ChallengeSubmissionStatus
 from rank_config import get_rank_by_experience
 from postgres_config import get_postgres_connection_string, validate_postgres_config
 
@@ -204,6 +204,45 @@ class Database:
                     sent_at INTEGER
                 )
             ''')
+
+            # Создаем таблицу челленджей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS challenges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    subscription_level INTEGER, -- NULL для всех, 2 для уровня 2, 3 для уровня 3
+                    media_path TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER,
+                    created_by INTEGER
+                )
+            ''')
+
+            # Создаем таблицу ответов на челленджи
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS challenge_submissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    challenge_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    media_path TEXT,
+                    text TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at INTEGER NOT NULL,
+                    moderator_comment TEXT,
+                    approved_at INTEGER,
+                    FOREIGN KEY (challenge_id) REFERENCES challenges (id),
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id)
+                )
+            ''')
+
+            # Создаем индексы для челленджей
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_challenges_subscription_level ON challenges(subscription_level)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_challenges_active ON challenges(is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_challenge_submissions_challenge_id ON challenge_submissions(challenge_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_challenge_submissions_user_id ON challenge_submissions(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_challenge_submissions_status ON challenge_submissions(status)')
 
             # Индекс для быстрого поиска неотправленных уведомлений
             await db.execute('''
@@ -918,6 +957,35 @@ class Database:
                     referral_count=row['referral_count']
                 ))
             return users
+    
+    async def get_users_by_subscription_level(self, subscription_level: int) -> list[int]:
+        """Получение списка telegram_id пользователей с определенным уровнем подписки
+        
+        Args:
+            subscription_level: Уровень подписки (2 или 3)
+            
+        Returns:
+            Список telegram_id пользователей с активной подпиской указанного уровня
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            current_timestamp = int(datetime.datetime.now().timestamp())
+            cursor = await db.execute('''
+                SELECT DISTINCT u.telegram_id
+                FROM users u
+                JOIN subscriptions s ON u.telegram_id = s.user_id
+                WHERE s.status = 'active'
+                    AND s.end_date > ?
+                    AND s.subscription_level = ?
+            ''', (current_timestamp, subscription_level))
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+    
+    async def get_all_users_telegram_ids(self) -> list[int]:
+        """Получение списка всех telegram_id пользователей (с подпиской и без)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT telegram_id FROM users")
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
 
     async def save_payment(self, payment: Payment) -> int:
         """Сохранение платежа в базу данных"""
@@ -2819,6 +2887,273 @@ class Database:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    # Методы для работы с челленджами
+    
+    async def save_challenge(self, challenge: Challenge) -> int:
+        """Сохранение или обновление челленджа"""
+        async with aiosqlite.connect(self.db_path) as db:
+            if challenge.id is None:
+                # Создание нового челленджа
+                cursor = await db.execute('''
+                    INSERT INTO challenges (title, description, subscription_level, media_path, is_active, created_at, expires_at, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    challenge.title,
+                    challenge.description,
+                    challenge.subscription_level,
+                    challenge.media_path,
+                    challenge.is_active,
+                    challenge.created_at,
+                    challenge.expires_at,
+                    challenge.created_by
+                ))
+                challenge.id = cursor.lastrowid
+            else:
+                # Обновление существующего челленджа
+                await db.execute('''
+                    UPDATE challenges SET
+                        title = ?,
+                        description = ?,
+                        subscription_level = ?,
+                        media_path = ?,
+                        is_active = ?,
+                        expires_at = ?
+                    WHERE id = ?
+                ''', (
+                    challenge.title,
+                    challenge.description,
+                    challenge.subscription_level,
+                    challenge.media_path,
+                    challenge.is_active,
+                    challenge.expires_at,
+                    challenge.id
+                ))
+            await db.commit()
+            logger.info(f"Челлендж '{challenge.title}' сохранен (ID: {challenge.id})")
+            return challenge.id
+    
+    async def get_challenge_by_id(self, challenge_id: int) -> Optional[Challenge]:
+        """Получение челленджа по ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM challenges WHERE id = ?', (challenge_id,))
+            row = await cursor.fetchone()
+            if row:
+                return Challenge(
+                    id=row['id'],
+                    title=row['title'],
+                    description=row['description'],
+                    subscription_level=row['subscription_level'],
+                    media_path=row['media_path'],
+                    is_active=bool(row['is_active']),
+                    created_at=row['created_at'],
+                    expires_at=row['expires_at'],
+                    created_by=row['created_by']
+                )
+            return None
+    
+    async def get_active_challenges(self, subscription_level: Optional[int] = None) -> list[Challenge]:
+        """Получение активных челленджей
+        
+        Args:
+            subscription_level: Уровень подписки пользователя (None - для всех, 2 или 3 - для конкретного уровня)
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            current_timestamp = int(datetime.datetime.now().timestamp())
+            
+            if subscription_level is None:
+                # Получаем челленджи для всех уровней (subscription_level IS NULL)
+                cursor = await db.execute('''
+                    SELECT * FROM challenges
+                    WHERE is_active = 1
+                        AND (expires_at IS NULL OR expires_at > ?)
+                        AND subscription_level IS NULL
+                    ORDER BY created_at DESC
+                ''', (current_timestamp,))
+            else:
+                # Получаем челленджи для конкретного уровня или для всех
+                cursor = await db.execute('''
+                    SELECT * FROM challenges
+                    WHERE is_active = 1
+                        AND (expires_at IS NULL OR expires_at > ?)
+                        AND (subscription_level = ? OR subscription_level IS NULL)
+                    ORDER BY created_at DESC
+                ''', (current_timestamp, subscription_level))
+            
+            rows = await cursor.fetchall()
+            challenges = []
+            for row in rows:
+                challenges.append(Challenge(
+                    id=row['id'],
+                    title=row['title'],
+                    description=row['description'],
+                    subscription_level=row['subscription_level'],
+                    media_path=row['media_path'],
+                    is_active=bool(row['is_active']),
+                    created_at=row['created_at'],
+                    expires_at=row['expires_at'],
+                    created_by=row['created_by']
+                ))
+            return challenges
+    
+    async def get_all_challenges(self, active_only: bool = True) -> list[Challenge]:
+        """Получение всех челленджей (для администратора)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if active_only:
+                cursor = await db.execute('SELECT * FROM challenges WHERE is_active = 1 ORDER BY created_at DESC')
+            else:
+                cursor = await db.execute('SELECT * FROM challenges ORDER BY created_at DESC')
+            
+            rows = await cursor.fetchall()
+            challenges = []
+            for row in rows:
+                challenges.append(Challenge(
+                    id=row['id'],
+                    title=row['title'],
+                    description=row['description'],
+                    subscription_level=row['subscription_level'],
+                    media_path=row['media_path'],
+                    is_active=bool(row['is_active']),
+                    created_at=row['created_at'],
+                    expires_at=row['expires_at'],
+                    created_by=row['created_by']
+                ))
+            return challenges
+    
+    async def save_challenge_submission(self, submission: ChallengeSubmission) -> int:
+        """Сохранение ответа на челлендж"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO challenge_submissions (challenge_id, user_id, media_path, text, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                submission.challenge_id,
+                submission.user_id,
+                submission.media_path,
+                submission.text,
+                submission.status.value,
+                submission.created_at
+            ))
+            submission.id = cursor.lastrowid
+            await db.commit()
+            logger.info(f"Ответ на челлендж {submission.challenge_id} от пользователя {submission.user_id} сохранен")
+            return submission.id
+    
+    async def get_challenge_submission_by_id(self, submission_id: int) -> Optional[ChallengeSubmission]:
+        """Получение ответа на челлендж по ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM challenge_submissions WHERE id = ?', (submission_id,))
+            row = await cursor.fetchone()
+            if row:
+                return ChallengeSubmission(
+                    id=row['id'],
+                    challenge_id=row['challenge_id'],
+                    user_id=row['user_id'],
+                    media_path=row['media_path'],
+                    text=row['text'],
+                    status=ChallengeSubmissionStatus(row['status']),
+                    created_at=row['created_at'],
+                    moderator_comment=row['moderator_comment'],
+                    approved_at=row['approved_at']
+                )
+            return None
+    
+    async def get_pending_challenge_submissions(self, limit: int = 50) -> list[tuple]:
+        """Получение ответов на челленджи, ожидающих проверки"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT cs.id, cs.challenge_id, cs.user_id, cs.media_path, cs.text, cs.created_at,
+                       c.title as challenge_title, u.name as user_name, ps.nickname
+                FROM challenge_submissions cs
+                JOIN challenges c ON cs.challenge_id = c.id
+                JOIN users u ON cs.user_id = u.telegram_id
+                LEFT JOIN player_stats ps ON cs.user_id = ps.user_id
+                WHERE cs.status = 'pending'
+                ORDER BY cs.created_at ASC
+                LIMIT ?
+            ''', (limit,))
+            rows = await cursor.fetchall()
+            return [(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8]) for row in rows]
+    
+    async def get_challenge_submission_details(self, submission_id: int) -> Optional[dict]:
+        """Получение детальной информации об ответе на челлендж"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT cs.*, c.title as challenge_title, c.description as challenge_description,
+                       u.name, ps.nickname, ps.photo_path
+                FROM challenge_submissions cs
+                JOIN challenges c ON cs.challenge_id = c.id
+                JOIN users u ON cs.user_id = u.telegram_id
+                LEFT JOIN player_stats ps ON cs.user_id = ps.user_id
+                WHERE cs.id = ?
+            ''', (submission_id,))
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+    
+    async def approve_challenge_submission(self, submission_id: int, moderator_id: int) -> bool:
+        """Одобрение ответа на челлендж"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                current_timestamp = int(datetime.datetime.now().timestamp())
+                await db.execute('''
+                    UPDATE challenge_submissions
+                    SET status = 'approved', approved_at = ?, moderator_comment = ?
+                    WHERE id = ?
+                ''', (current_timestamp, f"Одобрено модератором {moderator_id}", submission_id))
+                await db.commit()
+                logger.info(f"Ответ на челлендж {submission_id} одобрен модератором {moderator_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Ошибка при одобрении ответа на челлендж: {e}")
+                return False
+    
+    async def reject_challenge_submission(self, submission_id: int, moderator_id: int, reason: str) -> bool:
+        """Отклонение ответа на челлендж"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute('''
+                    UPDATE challenge_submissions
+                    SET status = 'rejected', moderator_comment = ?
+                    WHERE id = ?
+                ''', (reason, submission_id))
+                await db.commit()
+                logger.info(f"Ответ на челлендж {submission_id} отклонен модерatorом {moderator_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Ошибка при отклонении ответа на челлендж: {e}")
+                return False
+    
+    async def get_user_challenge_submissions(self, user_id: int, challenge_id: int) -> Optional[ChallengeSubmission]:
+        """Проверка, отправил ли пользователь уже ответ на челлендж"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM challenge_submissions
+                WHERE user_id = ? AND challenge_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            ''', (user_id, challenge_id))
+            row = await cursor.fetchone()
+            if row:
+                return ChallengeSubmission(
+                    id=row['id'],
+                    challenge_id=row['challenge_id'],
+                    user_id=row['user_id'],
+                    media_path=row['media_path'],
+                    text=row['text'],
+                    status=ChallengeSubmissionStatus(row['status']),
+                    created_at=row['created_at'],
+                    moderator_comment=row['moderator_comment'],
+                    approved_at=row['approved_at']
+                )
+            return None
 
     async def get_moderator_by_telegram_id(self, telegram_id: int) -> Optional[dict]:
         """Получение модератора по Telegram ID"""

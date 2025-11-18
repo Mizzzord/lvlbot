@@ -152,3 +152,37 @@ class Prize:
     is_active: bool = True  # активен ли приз
     created_at: int = 0  # timestamp создания
     updated_at: int = 0  # timestamp обновления
+
+class ChallengeStatus(Enum):
+    ACTIVE = "active"      # челлендж активен
+    INACTIVE = "inactive"  # челлендж неактивен
+    EXPIRED = "expired"    # челлендж истек
+
+class ChallengeSubmissionStatus(Enum):
+    PENDING = "pending"    # ответ отправлен, ожидает проверки
+    APPROVED = "approved"  # ответ одобрен
+    REJECTED = "rejected"  # ответ отклонен
+
+@dataclass
+class Challenge:
+    id: Optional[int] = None
+    title: str = ""  # название челленджа
+    description: str = ""  # описание челленджа
+    subscription_level: Optional[int] = None  # уровень подписки (None - для всех, 2 - для уровня 2, 3 - для уровня 3)
+    media_path: Optional[str] = None  # путь к медиафайлу челленджа (опционально)
+    is_active: bool = True  # активен ли челлендж
+    created_at: int = 0  # timestamp создания
+    expires_at: Optional[int] = None  # timestamp окончания (опционально)
+    created_by: Optional[int] = None  # telegram_id администратора, создавшего челлендж
+
+@dataclass
+class ChallengeSubmission:
+    id: Optional[int] = None
+    challenge_id: int = 0  # ID челленджа
+    user_id: int = 0  # telegram_id пользователя
+    media_path: Optional[str] = None  # путь к загруженному медиафайлу
+    text: Optional[str] = None  # текстовый комментарий пользователя
+    status: ChallengeSubmissionStatus = ChallengeSubmissionStatus.PENDING
+    created_at: int = 0  # timestamp создания ответа
+    moderator_comment: Optional[str] = None  # комментарий модератора
+    approved_at: Optional[int] = None  # timestamp одобрения

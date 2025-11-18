@@ -19,7 +19,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKey
 
 from config import BOT_TOKEN, USE_POSTGRES, DATABASE_PATH
 from database import Database
-from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType
+from models import User, Payment, PaymentStatus, Subscription, SubscriptionStatus, PlayerStats, Rank, DailyTask, UserStats, TaskStatus, Prize, PrizeType, Challenge, ChallengeSubmission, ChallengeSubmissionStatus
 from polza_config import (
     POLZA_API_KEY, POLZA_BASE_URL, DEFAULT_MODEL, VISION_MODEL, SYSTEM_PROMPT,
     PHOTO_ANALYSIS_PROMPT, TASK_GENERATION_TEMPLATE
@@ -57,6 +57,11 @@ class UserRegistration(StatesGroup):
     changing_goal = State()
     changing_goal_confirmation = State()
 
+class ChallengeStates(StatesGroup):
+    viewing_challenges = State()  # Просмотр списка челленджей
+    submitting_challenge = State()  # Загрузка ответа на челлендж
+    waiting_for_challenge_text = State()  # Ввод текстового комментария к ответу
+
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -86,6 +91,7 @@ def create_main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📋 Активные задания")],
             [KeyboardButton(text="👤 Профиль")],
             [KeyboardButton(text="🎁 Призы")],
+            [KeyboardButton(text="🏆 Челленджи")],
             [KeyboardButton(text="💬 Поддержка")]
         ],
         resize_keyboard=True,
@@ -2902,6 +2908,354 @@ async def handle_prizes(message: Message, state: FSMContext):
         prize_text,
         parse_mode="HTML",
         reply_markup=create_main_menu_keyboard()
+    )
+
+@router.message(F.text == "🏆 Челленджи")
+async def handle_challenges(message: Message, state: FSMContext):
+    """Обработка просмотра челленджей"""
+    user_id = message.from_user.id
+    
+    # Получаем активную подписку пользователя для определения уровня
+    active_subscription = await db.get_active_subscription(user_id)
+    subscription_level = active_subscription.subscription_level if active_subscription else None
+    
+    # Получаем активные челленджи для уровня подписки пользователя
+    challenges = await db.get_active_challenges(subscription_level=subscription_level)
+    
+    if not challenges:
+        await message.answer(
+            "🏆 <b>Челленджи</b>\n\n"
+            "📭 Пока нет активных челленджей для вашего уровня подписки.\n\n"
+            "Следите за обновлениями! Новые челленджи появятся здесь.",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+        return
+    
+    text = "🏆 <b>Активные челленджи</b>\n\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    for challenge in challenges:
+        # Проверяем, отправил ли пользователь уже ответ
+        existing_submission = await db.get_user_challenge_submissions(user_id, challenge.id)
+        
+        level_indicator = ""
+        if challenge.subscription_level:
+            if challenge.subscription_level == 3:
+                level_indicator = " 👑"
+            elif challenge.subscription_level == 2:
+                level_indicator = " 💎"
+        
+        status_emoji = "✅" if existing_submission else "🎯"
+        status_text = " (ответ отправлен)" if existing_submission else ""
+        
+        text += f"{status_emoji} <b>{challenge.title}</b>{level_indicator}{status_text}\n"
+        text += f"   └ {challenge.description[:100]}{'...' if len(challenge.description) > 100 else ''}\n"
+        
+        if challenge.expires_at:
+            import time
+            expires_date = time.strftime('%d.%m.%Y %H:%M', time.localtime(challenge.expires_at))
+            text += f"   └ ⏰ До: {expires_date}\n"
+        
+        text += "\n"
+        
+        # Добавляем кнопку для просмотра/отправки ответа
+        if existing_submission:
+            if existing_submission.status == ChallengeSubmissionStatus.APPROVED:
+                button_text = f"✅ {challenge.title[:30]} (одобрено)"
+            elif existing_submission.status == ChallengeSubmissionStatus.REJECTED:
+                button_text = f"❌ {challenge.title[:30]} (отклонено)"
+            else:
+                button_text = f"⏳ {challenge.title[:30]} (на проверке)"
+        else:
+            button_text = f"📤 Отправить ответ: {challenge.title[:25]}"
+        
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"view_challenge_{challenge.id}"
+            )
+        ])
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_main_menu")
+    ])
+    
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(ChallengeStates.viewing_challenges)
+
+@router.callback_query(lambda c: c.data.startswith("view_challenge_"))
+async def handle_view_challenge(callback: CallbackQuery, state: FSMContext):
+    """Просмотр деталей челленджа и отправка ответа"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    challenge_id = int(callback.data.replace("view_challenge_", ""))
+    
+    challenge = await db.get_challenge_by_id(challenge_id)
+    if not challenge:
+        await callback.message.edit_text("❌ Челлендж не найден.")
+        return
+    
+    # Проверяем, отправил ли пользователь уже ответ
+    existing_submission = await db.get_user_challenge_submissions(user_id, challenge_id)
+    
+    text = f"🏆 <b>{challenge.title}</b>\n\n"
+    text += f"{challenge.description}\n\n"
+    
+    if challenge.expires_at:
+        import time
+        expires_date = time.strftime('%d.%m.%Y %H:%M', time.localtime(challenge.expires_at))
+        text += f"⏰ <b>Срок действия:</b> до {expires_date}\n\n"
+    
+    if existing_submission:
+        if existing_submission.status == ChallengeSubmissionStatus.APPROVED:
+            text += "✅ <b>Ваш ответ одобрен!</b>\n\n"
+            if existing_submission.moderator_comment:
+                text += f"💬 <b>Комментарий модератора:</b> {existing_submission.moderator_comment}\n\n"
+        elif existing_submission.status == ChallengeSubmissionStatus.REJECTED:
+            text += "❌ <b>Ваш ответ отклонен</b>\n\n"
+            if existing_submission.moderator_comment:
+                text += f"💬 <b>Причина:</b> {existing_submission.moderator_comment}\n\n"
+            text += "Вы можете отправить новый ответ."
+        else:
+            text += "⏳ <b>Ваш ответ на проверке</b>\n\n"
+            text += "Ожидайте решения модератора."
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    # Если медиафайл есть, отправляем его отдельно
+    if challenge.media_path and os.path.exists(challenge.media_path):
+        try:
+            if challenge.media_path.endswith(('.jpg', '.jpeg', '.png')):
+                photo = FSInputFile(challenge.media_path)
+                await callback.message.answer_photo(photo, caption=text, parse_mode="HTML")
+            elif challenge.media_path.endswith(('.mp4', '.avi', '.mov')):
+                video = FSInputFile(challenge.media_path)
+                await callback.message.answer_video(video, caption=text, parse_mode="HTML")
+            else:
+                await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Ошибка отправки медиафайла челленджа: {e}")
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    # Если ответ еще не отправлен или был отклонен, показываем кнопку отправки
+    if not existing_submission or existing_submission.status == ChallengeSubmissionStatus.REJECTED:
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text="📤 Отправить ответ", callback_data=f"submit_challenge_{challenge_id}")
+        ])
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="⬅️ Назад к челленджам", callback_data="back_to_challenges")
+    ])
+    
+    await callback.message.answer(
+        "Выберите действие:",
+        reply_markup=keyboard
+    )
+
+@router.callback_query(lambda c: c.data.startswith("submit_challenge_"))
+async def handle_submit_challenge_start(callback: CallbackQuery, state: FSMContext):
+    """Начало процесса отправки ответа на челлендж"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    challenge_id = int(callback.data.replace("submit_challenge_", ""))
+    
+    challenge = await db.get_challenge_by_id(challenge_id)
+    if not challenge:
+        await callback.message.edit_text("❌ Челлендж не найден.")
+        return
+    
+    # Сохраняем ID челленджа в состоянии
+    await state.update_data(challenge_id=challenge_id)
+    
+    text = f"📤 <b>Отправка ответа на челлендж</b>\n\n"
+    text += f"🏆 <b>{challenge.title}</b>\n\n"
+    text += "Отправьте фото или видео вашего ответа (до 30 секунд для видео).\n"
+    text += "Вы также можете добавить текстовый комментарий после загрузки медиафайла."
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_challenge_{challenge_id}")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(ChallengeStates.submitting_challenge)
+
+@router.message(ChallengeStates.submitting_challenge, F.photo | F.video)
+async def handle_challenge_media_submission(message: Message, state: FSMContext):
+    """Обработка загрузки медиафайла для ответа на челлендж"""
+    user_id = message.from_user.id
+    data = await state.get_data()
+    challenge_id = data.get('challenge_id')
+    
+    if not challenge_id:
+        await message.answer("❌ Ошибка: челлендж не найден.")
+        await state.clear()
+        return
+    
+    challenge = await db.get_challenge_by_id(challenge_id)
+    if not challenge:
+        await message.answer("❌ Челлендж не найден.")
+        await state.clear()
+        return
+    
+    try:
+        # Создаем директорию для медиафайлов челленджей
+        media_dir = "task_submissions"  # Используем ту же директорию
+        os.makedirs(media_dir, exist_ok=True)
+        
+        # Определяем тип медиафайла и сохраняем его
+        if message.photo:
+            media_file = message.photo[-1]  # Самое большое фото
+            file_extension = "jpg"
+            file_name = f"{media_dir}/challenge_{challenge_id}_{user_id}_{int(datetime.datetime.now().timestamp())}.jpg"
+        else:  # video
+            media_file = message.video
+            # Проверяем длительность видео (максимум 30 секунд)
+            if media_file.duration and media_file.duration > 30:
+                await message.answer("❌ Видео должно быть не длиннее 30 секунд.")
+                return
+            file_extension = media_file.file_name.split('.')[-1] if media_file.file_name else "mp4"
+            file_name = f"{media_dir}/challenge_{challenge_id}_{user_id}_{int(datetime.datetime.now().timestamp())}.mp4"
+        
+        # Скачиваем файл
+        file_bytes = await bot.download(media_file.file_id)
+        
+        # Сохраняем файл
+        with open(file_name, 'wb') as f:
+            f.write(file_bytes.read())
+        
+        # Сохраняем путь к файлу в состоянии
+        await state.update_data(challenge_media_path=file_name)
+        
+        text = "✅ <b>Медиафайл загружен!</b>\n\n"
+        text += "Теперь вы можете добавить текстовый комментарий к вашему ответу (или отправьте 'пропустить' чтобы отправить без комментария):"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭️ Пропустить комментарий", callback_data="skip_challenge_text")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_challenge_{challenge_id}")]
+        ])
+        
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        await state.set_state(ChallengeStates.waiting_for_challenge_text)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении медиафайла челленджа: {e}")
+        await message.answer("❌ Ошибка при загрузке файла. Попробуйте еще раз.")
+
+@router.message(ChallengeStates.submitting_challenge, ~F.photo & ~F.video)
+async def handle_challenge_text_only_submission(message: Message, state: FSMContext):
+    """Обработка отправки только текста без медиафайла"""
+    user_id = message.from_user.id
+    data = await state.get_data()
+    challenge_id = data.get('challenge_id')
+    
+    if not challenge_id:
+        await message.answer("❌ Ошибка: челлендж не найден.")
+        await state.clear()
+        return
+    
+    text = message.text.strip()
+    if len(text) < 3:
+        await message.answer("❌ Текст слишком короткий. Минимум 3 символа или отправьте фото/видео.")
+        return
+    
+    # Сохраняем только текст
+    await state.update_data(challenge_text=text, challenge_media_path=None)
+    
+    # Отправляем ответ
+    await submit_challenge_response(message, state)
+
+@router.message(ChallengeStates.waiting_for_challenge_text)
+async def handle_challenge_text_input(message: Message, state: FSMContext):
+    """Обработка ввода текстового комментария к ответу на челлендж"""
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    if text.lower() == 'пропустить':
+        text = None
+    elif len(text) < 3:
+        await message.answer("❌ Текст слишком короткий. Минимум 3 символа или отправьте 'пропустить'.")
+        return
+    
+    await state.update_data(challenge_text=text)
+    await submit_challenge_response(message, state)
+
+@router.callback_query(lambda c: c.data == "skip_challenge_text")
+async def handle_skip_challenge_text(callback: CallbackQuery, state: FSMContext):
+    """Пропуск текстового комментария"""
+    await callback.answer()
+    await state.update_data(challenge_text=None)
+    await submit_challenge_response(callback.message, state)
+
+async def submit_challenge_response(message_or_callback, state: FSMContext):
+    """Отправка ответа на челлендж"""
+    if isinstance(message_or_callback, CallbackQuery):
+        message = message_or_callback.message
+    else:
+        message = message_or_callback
+    
+    user_id = message.from_user.id
+    data = await state.get_data()
+    challenge_id = data.get('challenge_id')
+    media_path = data.get('challenge_media_path')
+    text = data.get('challenge_text')
+    
+    if not challenge_id:
+        await message.answer("❌ Ошибка: челлендж не найден.")
+        await state.clear()
+        return
+    
+    if not media_path and not text:
+        await message.answer("❌ Отправьте фото, видео или текст.")
+        return
+    
+    # Создаем объект ответа
+    submission = ChallengeSubmission(
+        challenge_id=challenge_id,
+        user_id=user_id,
+        media_path=media_path,
+        text=text,
+        status=ChallengeSubmissionStatus.PENDING,
+        created_at=int(datetime.datetime.now().timestamp())
+    )
+    
+    # Сохраняем ответ в базу данных
+    submission_id = await db.save_challenge_submission(submission)
+    
+    if submission_id:
+        challenge = await db.get_challenge_by_id(challenge_id)
+        await message.answer(
+            f"✅ <b>Ответ отправлен!</b>\n\n"
+            f"🏆 <b>{challenge.title}</b>\n\n"
+            f"Ваш ответ отправлен на проверку модератору.\n"
+            f"Вы получите уведомление о результате проверки.",
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
+    else:
+        await message.answer("❌ Ошибка при отправке ответа. Попробуйте еще раз.")
+    
+    await state.clear()
+
+@router.callback_query(lambda c: c.data == "back_to_challenges")
+async def handle_back_to_challenges(callback: CallbackQuery, state: FSMContext):
+    """Возврат к списку челленджей"""
+    await callback.answer()
+    await handle_challenges(callback.message, state)
+
+@router.callback_query(lambda c: c.data == "back_to_main_menu")
+async def handle_back_to_main_menu_from_challenges(callback: CallbackQuery, state: FSMContext):
+    """Возврат в главное меню из челленджей"""
+    await callback.answer()
+    await state.set_state(UserRegistration.main_menu)
+    await callback.message.edit_text(
+        "🏠 <b>Главное меню</b>\n\n"
+        "Выберите действие:",
+        reply_markup=create_main_menu_keyboard(),
+        parse_mode="HTML"
     )
 
 @router.message(F.text == "💬 Поддержка")

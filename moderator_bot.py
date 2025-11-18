@@ -20,15 +20,16 @@ class ModerationStates(StatesGroup):
     choosing_task_action = State()
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 )
 
 from moderator_config import (
     MODERATOR_BOT_TOKEN, ADMIN_TELEGRAM_IDS, BLOGGER_TELEGRAM_IDS, MODERATOR_TELEGRAM_IDS,
     DATABASE_PATH, LOG_LEVEL, LOG_FILE
 )
+from config import BOT_TOKEN
 from database import Database
-from models import Prize, PrizeType, Rank, Subscription, SubscriptionStatus
+from models import Prize, PrizeType, Rank, Subscription, SubscriptionStatus, Challenge, ChallengeSubmission, ChallengeSubmissionStatus
 from subscription_config import SUBSCRIPTION_LEVELS
 import datetime
 
@@ -132,6 +133,19 @@ class SubscriptionGrantStates(StatesGroup):
     waiting_for_level_selection = State()
     confirming_subscription = State()
 
+class BroadcastStates(StatesGroup):
+    waiting_for_broadcast_type = State()  # Выбор типа рассылки
+    waiting_for_broadcast_message = State()  # Ввод текста сообщения
+    confirming_broadcast = State()  # Подтверждение рассылки
+
+class ChallengeCreationStates(StatesGroup):
+    waiting_for_challenge_type = State()  # Выбор типа челленджа (для всех или по уровню)
+    waiting_for_challenge_title = State()  # Ввод названия челленджа
+    waiting_for_challenge_description = State()  # Ввод описания челленджа
+    waiting_for_challenge_media = State()  # Загрузка медиафайла (опционально)
+    waiting_for_challenge_expires = State()  # Установка срока действия (опционально)
+    confirming_challenge = State()  # Подтверждение создания челленджа
+
 def create_admin_keyboard() -> ReplyKeyboardMarkup:
     """Создание клавиатуры для главного модератора"""
     keyboard = [
@@ -140,6 +154,8 @@ def create_admin_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="📊 Общая статистика")],
         [KeyboardButton(text="🔍 Поиск пользователя")],
         [KeyboardButton(text="💎 Выдать подписку")],
+        [KeyboardButton(text="📢 Рассылка сообщений")],
+        [KeyboardButton(text="🏆 Создать челлендж")],
         [KeyboardButton(text="🛡️ Управление модераторами"), KeyboardButton(text="📣 Управление блогерами")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -1068,6 +1084,899 @@ async def handle_prize_management(message: Message):
         # Неизвестная роль
         logger.warning(f"Пользователь {user_id} с неизвестной ролью {role} попытался получить доступ к управлению призами")
         await message.answer("❌ У вас нет доступа к этой функции.")
+
+@dp.message(F.text == "📢 Рассылка сообщений")
+async def handle_broadcast(message: Message, state: FSMContext):
+    """Начало процесса рассылки сообщений"""
+    user_id = message.from_user.id
+
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    text = "📢 <b>Рассылка сообщений</b>\n\n"
+    text += "Выберите тип рассылки:"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Всем пользователям", callback_data="broadcast_all")],
+        [InlineKeyboardButton(text="💎 Уровень 2 (PRIME)", callback_data="broadcast_level_2")],
+        [InlineKeyboardButton(text="👑 Уровень 3 (BASIC + PRIME)", callback_data="broadcast_level_3")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_admin_menu")]
+    ])
+
+    await message.answer(text, reply_markup=keyboard)
+    await state.set_state(BroadcastStates.waiting_for_broadcast_type)
+
+@dp.callback_query(BroadcastStates.waiting_for_broadcast_type, lambda c: c.data.startswith("broadcast_"))
+async def handle_broadcast_type_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора типа рассылки"""
+    await callback.answer()
+    
+    broadcast_type = callback.data.replace("broadcast_", "")
+    
+    if broadcast_type == "all":
+        # Получаем количество всех пользователей
+        user_ids = await db.get_all_users_telegram_ids()
+        count = len(user_ids)
+        target_text = "всем пользователям"
+    elif broadcast_type == "level_2":
+        user_ids = await db.get_users_by_subscription_level(2)
+        count = len(user_ids)
+        target_text = "пользователям с уровнем подписки 2 (PRIME)"
+    elif broadcast_type == "level_3":
+        user_ids = await db.get_users_by_subscription_level(3)
+        count = len(user_ids)
+        target_text = "пользователям с уровнем подписки 3 (BASIC + PRIME)"
+    else:
+        await callback.message.edit_text("❌ Неверный тип рассылки.")
+        await state.clear()
+        return
+    
+    if count == 0:
+        await callback.message.edit_text(
+            f"❌ Нет пользователей для рассылки.\n\n"
+            f"Выбранная группа: {target_text}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+            ])
+        )
+        await state.clear()
+        return
+    
+    # Сохраняем информацию о рассылке
+    await state.update_data(
+        broadcast_type=broadcast_type,
+        target_count=count,
+        target_text=target_text,
+        user_ids=user_ids
+    )
+    
+    text = f"📢 <b>Рассылка сообщений</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n"
+    text += f"👥 <b>Количество:</b> {count} пользователей\n\n"
+    text += "Введите текст сообщения для рассылки:"
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_broadcast")]
+        ])
+    )
+    
+    await state.set_state(BroadcastStates.waiting_for_broadcast_message)
+
+@dp.message(BroadcastStates.waiting_for_broadcast_message)
+async def handle_broadcast_message_input(message: Message, state: FSMContext):
+    """Обработка ввода текста сообщения для рассылки"""
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    broadcast_text = message.text or message.caption
+    
+    if not broadcast_text or len(broadcast_text.strip()) < 3:
+        await message.answer("❌ Сообщение слишком короткое. Минимум 3 символа.")
+        return
+    
+    data = await state.get_data()
+    target_count = data.get('target_count', 0)
+    target_text = data.get('target_text', '')
+    
+    # Проверяем, есть ли медиафайл
+    has_media = False
+    media_file_id = None
+    media_type = None
+    
+    if message.photo:
+        has_media = True
+        media_type = "photo"
+        media_file_id = message.photo[-1].file_id
+    elif message.video:
+        has_media = True
+        media_type = "video"
+        media_file_id = message.video.file_id
+    elif message.document:
+        has_media = True
+        media_type = "document"
+        media_file_id = message.document.file_id
+    
+    # Сохраняем данные рассылки
+    await state.update_data(
+        broadcast_text=broadcast_text,
+        has_media=has_media,
+        media_file_id=media_file_id,
+        media_type=media_type
+    )
+    
+    # Показываем подтверждение
+    text = f"📢 <b>Подтверждение рассылки</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n"
+    text += f"👥 <b>Количество:</b> {target_count} пользователей\n\n"
+    text += f"📝 <b>Текст сообщения:</b>\n{broadcast_text[:500]}"
+    if len(broadcast_text) > 500:
+        text += "\n... (текст обрезан)"
+    
+    if has_media:
+        text += f"\n\n📎 <b>Медиафайл:</b> {media_type}"
+    
+    text += "\n\nОтправить рассылку?"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_broadcast")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_broadcast")]
+    ])
+    
+    if has_media and media_type == "photo":
+        # Отправляем фото с текстом для предпросмотра
+        await message.answer_photo(
+            photo=message.photo[-1].file_id,
+            caption=text,
+            reply_markup=keyboard
+        )
+    elif has_media and media_type == "video":
+        await message.answer_video(
+            video=message.video.file_id,
+            caption=text,
+            reply_markup=keyboard
+        )
+    elif has_media and media_type == "document":
+        await message.answer_document(
+            document=message.document.file_id,
+            caption=text,
+            reply_markup=keyboard
+        )
+    else:
+        await message.answer(text, reply_markup=keyboard)
+    
+    await state.set_state(BroadcastStates.confirming_broadcast)
+
+@dp.callback_query(BroadcastStates.confirming_broadcast, lambda c: c.data == "confirm_broadcast")
+async def handle_confirm_broadcast(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение и отправка рассылки"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await callback.message.edit_text("❌ У вас нет доступа к этой функции.")
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    user_ids = data.get('user_ids', [])
+    broadcast_text = data.get('broadcast_text', '')
+    target_text = data.get('target_text', '')
+    has_media = data.get('has_media', False)
+    media_file_id = data.get('media_file_id')
+    media_type = data.get('media_type')
+    
+    if not user_ids or not broadcast_text:
+        await callback.message.edit_text("❌ Ошибка: данные рассылки не найдены.")
+        await state.clear()
+        return
+    
+    # Создаем экземпляр основного бота для отправки сообщений
+    main_bot = UserBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    
+    # Отправляем уведомление о начале рассылки
+    await callback.message.edit_text(
+        f"📢 <b>Рассылка начата</b>\n\n"
+        f"🎯 Получатели: {target_text}\n"
+        f"👥 Количество: {len(user_ids)} пользователей\n\n"
+        f"⏳ Отправка сообщений..."
+    )
+    
+    # Отправляем сообщения
+    success_count = 0
+    failed_count = 0
+    failed_users = []
+    
+    for user_telegram_id in user_ids:
+        try:
+            if has_media:
+                if media_type == "photo":
+                    await main_bot.send_photo(
+                        chat_id=user_telegram_id,
+                        photo=media_file_id,
+                        caption=broadcast_text
+                    )
+                elif media_type == "video":
+                    await main_bot.send_video(
+                        chat_id=user_telegram_id,
+                        video=media_file_id,
+                        caption=broadcast_text
+                    )
+                elif media_type == "document":
+                    await main_bot.send_document(
+                        chat_id=user_telegram_id,
+                        document=media_file_id,
+                        caption=broadcast_text
+                    )
+            else:
+                await main_bot.send_message(
+                    chat_id=user_telegram_id,
+                    text=broadcast_text
+                )
+            
+            success_count += 1
+            
+            # Небольшая задержка, чтобы не превысить лимиты API
+            if success_count % 30 == 0:
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            failed_count += 1
+            failed_users.append(user_telegram_id)
+            logger.error(f"Ошибка отправки сообщения пользователю {user_telegram_id}: {e}")
+    
+    # Закрываем сессию основного бота
+    await main_bot.session.close()
+    
+    # Отправляем отчет о рассылке
+    report_text = f"✅ <b>Рассылка завершена</b>\n\n"
+    report_text += f"🎯 <b>Получатели:</b> {target_text}\n"
+    report_text += f"👥 <b>Всего:</b> {len(user_ids)} пользователей\n"
+    report_text += f"✅ <b>Успешно:</b> {success_count}\n"
+    report_text += f"❌ <b>Ошибок:</b> {failed_count}"
+    
+    if failed_count > 0 and failed_count <= 10:
+        report_text += f"\n\n❌ <b>Не удалось отправить:</b>\n"
+        for failed_id in failed_users[:10]:
+            report_text += f"• {failed_id}\n"
+    
+    await callback.message.edit_text(
+        report_text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_admin_menu")]
+        ])
+    )
+    
+    logger.info(f"Рассылка завершена админом {user_id}. Успешно: {success_count}, Ошибок: {failed_count}")
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data == "cancel_broadcast")
+async def handle_cancel_broadcast(callback: CallbackQuery, state: FSMContext):
+    """Отмена рассылки"""
+    await callback.answer()
+    await callback.message.edit_text("❌ Рассылка отменена.")
+    await state.clear()
+
+@dp.message(F.text == "🏆 Создать челлендж")
+async def handle_create_challenge(message: Message, state: FSMContext):
+    """Начало процесса создания челленджа"""
+    user_id = message.from_user.id
+
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    text = "🏆 <b>Создание челленджа</b>\n\n"
+    text += "Выберите для кого будет доступен челлендж:"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Для всех пользователей", callback_data="challenge_type_all")],
+        [InlineKeyboardButton(text="💎 Для уровня 2 (PRIME)", callback_data="challenge_type_2")],
+        [InlineKeyboardButton(text="👑 Для уровня 3 (BASIC + PRIME)", callback_data="challenge_type_3")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_admin_menu")]
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(ChallengeCreationStates.waiting_for_challenge_type)
+
+@dp.callback_query(ChallengeCreationStates.waiting_for_challenge_type, lambda c: c.data.startswith("challenge_type_"))
+async def handle_challenge_type_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора типа челленджа"""
+    await callback.answer()
+    
+    challenge_type = callback.data.replace("challenge_type_", "")
+    
+    if challenge_type == "all":
+        subscription_level = None
+        target_text = "всем пользователям"
+    elif challenge_type == "2":
+        subscription_level = 2
+        target_text = "пользователям с уровнем подписки 2 (PRIME)"
+    elif challenge_type == "3":
+        subscription_level = 3
+        target_text = "пользователям с уровнем подписки 3 (BASIC + PRIME)"
+    else:
+        await callback.message.edit_text("❌ Неверный тип челленджа.")
+        await state.clear()
+        return
+    
+    await state.update_data(
+        subscription_level=subscription_level,
+        target_text=target_text
+    )
+    
+    text = f"🏆 <b>Создание челленджа</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n\n"
+    text += "Введите название челленджа:"
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+        ])
+    )
+    
+    await state.set_state(ChallengeCreationStates.waiting_for_challenge_title)
+
+@dp.message(ChallengeCreationStates.waiting_for_challenge_title)
+async def handle_challenge_title_input(message: Message, state: FSMContext):
+    """Обработка ввода названия челленджа"""
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    title = message.text.strip()
+    
+    if len(title) < 3:
+        await message.answer("❌ Название слишком короткое. Минимум 3 символа.")
+        return
+    
+    await state.update_data(challenge_title=title)
+    
+    data = await state.get_data()
+    target_text = data.get('target_text', '')
+    
+    text = f"🏆 <b>Создание челленджа</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n"
+    text += f"📝 <b>Название:</b> {title}\n\n"
+    text += "Введите описание челленджа:"
+    
+    await message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+        ])
+    )
+    
+    await state.set_state(ChallengeCreationStates.waiting_for_challenge_description)
+
+@dp.message(ChallengeCreationStates.waiting_for_challenge_description)
+async def handle_challenge_description_input(message: Message, state: FSMContext):
+    """Обработка ввода описания челленджа"""
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    description = message.text.strip()
+    
+    if len(description) < 10:
+        await message.answer("❌ Описание слишком короткое. Минимум 10 символов.")
+        return
+    
+    await state.update_data(challenge_description=description)
+    
+    data = await state.get_data()
+    target_text = data.get('target_text', '')
+    title = data.get('challenge_title', '')
+    
+    text = f"🏆 <b>Создание челленджа</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n"
+    text += f"📝 <b>Название:</b> {title}\n"
+    text += f"📄 <b>Описание:</b> {description[:200]}{'...' if len(description) > 200 else ''}\n\n"
+    text += "Отправьте медиафайл (фото или видео) для челленджа или нажмите 'Пропустить':"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭️ Пропустить медиафайл", callback_data="skip_challenge_media")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+    ])
+    
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(ChallengeCreationStates.waiting_for_challenge_media)
+
+@dp.message(ChallengeCreationStates.waiting_for_challenge_media, F.photo | F.video)
+async def handle_challenge_media_upload(message: Message, state: FSMContext):
+    """Обработка загрузки медиафайла для челленджа"""
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    try:
+        # Создаем директорию для медиафайлов челленджей
+        media_dir = "task_submissions"
+        os.makedirs(media_dir, exist_ok=True)
+        
+        # Определяем тип медиафайла и сохраняем его
+        if message.photo:
+            media_file = message.photo[-1]
+            file_name = f"{media_dir}/challenge_media_{user_id}_{int(datetime.datetime.now().timestamp())}.jpg"
+        else:  # video
+            media_file = message.video
+            file_extension = media_file.file_name.split('.')[-1] if media_file.file_name else "mp4"
+            file_name = f"{media_dir}/challenge_media_{user_id}_{int(datetime.datetime.now().timestamp())}.mp4"
+        
+        # Скачиваем файл
+        file_bytes = await bot.download(media_file.file_id)
+        
+        # Сохраняем файл
+        with open(file_name, 'wb') as f:
+            f.write(file_bytes.read())
+        
+        await state.update_data(challenge_media_path=file_name)
+        
+        data = await state.get_data()
+        target_text = data.get('target_text', '')
+        title = data.get('challenge_title', '')
+        description = data.get('challenge_description', '')
+        
+        text = f"🏆 <b>Создание челленджа</b>\n\n"
+        text += f"🎯 <b>Получатели:</b> {target_text}\n"
+        text += f"📝 <b>Название:</b> {title}\n"
+        text += f"📄 <b>Описание:</b> {description[:200]}{'...' if len(description) > 200 else ''}\n"
+        text += f"📎 <b>Медиафайл:</b> загружен\n\n"
+        text += "Установите срок действия челленджа (в днях) или нажмите 'Без срока':"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="♾️ Без срока", callback_data="challenge_no_expires")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+        ])
+        
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        await state.set_state(ChallengeCreationStates.waiting_for_challenge_expires)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении медиафайла челленджа: {e}")
+        await message.answer("❌ Ошибка при загрузке файла. Попробуйте еще раз.")
+
+@dp.callback_query(lambda c: c.data == "skip_challenge_media")
+async def handle_skip_challenge_media(callback: CallbackQuery, state: FSMContext):
+    """Пропуск медиафайла для челленджа"""
+    await callback.answer()
+    await state.update_data(challenge_media_path=None)
+    
+    data = await state.get_data()
+    target_text = data.get('target_text', '')
+    title = data.get('challenge_title', '')
+    description = data.get('challenge_description', '')
+    
+    text = f"🏆 <b>Создание челленджа</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n"
+    text += f"📝 <b>Название:</b> {title}\n"
+    text += f"📄 <b>Описание:</b> {description[:200]}{'...' if len(description) > 200 else ''}\n\n"
+    text += "Установите срок действия челленджа (в днях) или нажмите 'Без срока':"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="♾️ Без срока", callback_data="challenge_no_expires")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(ChallengeCreationStates.waiting_for_challenge_expires)
+
+@dp.message(ChallengeCreationStates.waiting_for_challenge_expires)
+async def handle_challenge_expires_input(message: Message, state: FSMContext):
+    """Обработка ввода срока действия челленджа"""
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    try:
+        days = int(message.text.strip())
+        if days < 1:
+            await message.answer("❌ Количество дней должно быть больше 0.")
+            return
+        
+        current_timestamp = int(datetime.datetime.now().timestamp())
+        expires_at = current_timestamp + (days * 24 * 60 * 60)
+        
+        await state.update_data(challenge_expires_at=expires_at)
+        await confirm_challenge_creation(message, state)
+        
+    except ValueError:
+        await message.answer("❌ Введите число дней (например: 7) или нажмите 'Без срока'.")
+
+@dp.callback_query(lambda c: c.data == "challenge_no_expires")
+async def handle_challenge_no_expires(callback: CallbackQuery, state: FSMContext):
+    """Создание челленджа без срока действия"""
+    await callback.answer()
+    await state.update_data(challenge_expires_at=None)
+    await confirm_challenge_creation(callback.message, state)
+
+async def confirm_challenge_creation(message_or_callback, state: FSMContext):
+    """Подтверждение создания челленджа"""
+    if isinstance(message_or_callback, CallbackQuery):
+        message = message_or_callback.message
+    else:
+        message = message_or_callback
+    
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    subscription_level = data.get('subscription_level')
+    target_text = data.get('target_text', '')
+    title = data.get('challenge_title', '')
+    description = data.get('challenge_description', '')
+    media_path = data.get('challenge_media_path')
+    expires_at = data.get('challenge_expires_at')
+    
+    text = f"🏆 <b>Подтверждение создания челленджа</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n"
+    text += f"📝 <b>Название:</b> {title}\n"
+    text += f"📄 <b>Описание:</b> {description[:300]}{'...' if len(description) > 300 else ''}\n"
+    
+    if media_path:
+        text += f"📎 <b>Медиафайл:</b> загружен\n"
+    
+    if expires_at:
+        import time
+        expires_date = time.strftime('%d.%m.%Y %H:%M', time.localtime(expires_at))
+        text += f"⏰ <b>Срок действия:</b> до {expires_date}\n"
+    else:
+        text += f"⏰ <b>Срок действия:</b> без ограничений\n"
+    
+    text += "\nСоздать челлендж?"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Создать", callback_data="confirm_challenge_creation")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+    ])
+    
+    if isinstance(message_or_callback, CallbackQuery):
+        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    await state.set_state(ChallengeCreationStates.confirming_challenge)
+
+@dp.callback_query(ChallengeCreationStates.confirming_challenge, lambda c: c.data == "confirm_challenge_creation")
+async def handle_confirm_challenge_creation(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение и создание челленджа"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await callback.message.edit_text("❌ У вас нет доступа к этой функции.")
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    subscription_level = data.get('subscription_level')
+    title = data.get('challenge_title', '')
+    description = data.get('challenge_description', '')
+    media_path = data.get('challenge_media_path')
+    expires_at = data.get('challenge_expires_at')
+    
+    if not title or not description:
+        await callback.message.edit_text("❌ Ошибка: данные челленджа не найдены.")
+        await state.clear()
+        return
+    
+    # Создаем объект челленджа
+    challenge = Challenge(
+        title=title,
+        description=description,
+        subscription_level=subscription_level,
+        media_path=media_path,
+        is_active=True,
+        created_at=int(datetime.datetime.now().timestamp()),
+        expires_at=expires_at,
+        created_by=user_id
+    )
+    
+    # Сохраняем челлендж в базу данных
+    challenge_id = await db.save_challenge(challenge)
+    
+    if challenge_id:
+        await callback.message.edit_text(
+            f"✅ <b>Челлендж создан!</b>\n\n"
+            f"🏆 <b>{title}</b>\n\n"
+            f"Челлендж успешно создан и доступен пользователям.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_admin_menu")]
+            ]),
+            parse_mode="HTML"
+        )
+        logger.info(f"Челлендж '{title}' создан админом {user_id} (ID: {challenge_id})")
+    else:
+        await callback.message.edit_text("❌ Ошибка при создании челленджа.")
+    
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data == "cancel_challenge_creation")
+async def handle_cancel_challenge_creation(callback: CallbackQuery, state: FSMContext):
+    """Отмена создания челленджа"""
+    await callback.answer()
+    await callback.message.edit_text("❌ Создание челленджа отменено.")
+    await state.clear()
+
+@dp.message(F.text == "🏆 Проверить челленджи")
+async def handle_moderator_check_challenges(message: Message):
+    """Проверка ответов на челленджи для администратора"""
+    user_id = message.from_user.id
+
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    # Получаем ответы на челленджи, ожидающие проверки
+    submissions = await db.get_pending_challenge_submissions(limit=50)
+
+    if not submissions:
+        await message.answer(
+            "🏆 <b>Проверка челленджей</b>\n\n"
+            "✅ Нет ответов на челленджи, ожидающих проверки.",
+            reply_markup=create_admin_keyboard(),
+            parse_mode="HTML"
+        )
+        return
+
+    text = f"🏆 <b>Ответы на челленджи</b>\n\n"
+    text += f"📋 <b>Ожидают проверки:</b> {len(submissions)}\n\n"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+
+    for submission_data in submissions[:20]:  # Показываем первые 20
+        submission_id, challenge_id, user_id_sub, media_path, text_sub, created_at, challenge_title, user_name, nickname = submission_data
+        
+        display_name = nickname if nickname else user_name if user_name else f"ID: {user_id_sub}"
+        
+        import time
+        created_date = time.strftime('%d.%m %H:%M', time.localtime(created_at))
+        
+        text += f"📤 <b>{challenge_title}</b>\n"
+        text += f"   👤 {display_name} • {created_date}\n\n"
+        
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"📤 {challenge_title[:25]} - {display_name[:15]}",
+                callback_data=f"check_challenge_{submission_id}"
+            )
+        ])
+
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_admin_menu")
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+@dp.callback_query(lambda c: c.data.startswith("check_challenge_"))
+async def handle_check_challenge(callback: CallbackQuery, state: FSMContext):
+    """Просмотр деталей ответа на челлендж"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await callback.message.edit_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    submission_id = int(callback.data.replace("check_challenge_", ""))
+    
+    # Получаем детальную информацию об ответе
+    details = await db.get_challenge_submission_details(submission_id)
+    
+    if not details:
+        await callback.message.edit_text("❌ Ответ на челлендж не найден.")
+        return
+    
+    challenge_title = details.get('challenge_title', 'Неизвестный челлендж')
+    challenge_description = details.get('challenge_description', '')
+    user_name = details.get('name', 'Неизвестный пользователь')
+    nickname = details.get('nickname')
+    media_path = details.get('media_path')
+    text_sub = details.get('text')
+    created_at = details.get('created_at')
+    
+    display_name = nickname if nickname else user_name
+    
+    import time
+    created_date = time.strftime('%d.%m.%Y %H:%M', time.localtime(created_at))
+    
+    full_text = f"🏆 <b>Ответ на челлендж</b>\n\n"
+    full_text += f"📋 <b>Челлендж:</b> {challenge_title}\n"
+    full_text += f"   └ {challenge_description[:100]}{'...' if len(challenge_description) > 100 else ''}\n\n"
+    full_text += f"👤 <b>Пользователь:</b> {display_name}\n"
+    full_text += f"📅 <b>Отправлено:</b> {created_date}\n\n"
+    
+    if text_sub:
+        full_text += f"💬 <b>Комментарий:</b>\n{text_sub}\n\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_challenge_{submission_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_challenge_{submission_id}")
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="back_to_challenges_list")]
+    ])
+    
+    # Отправляем медиафайл, если есть
+    if media_path and os.path.exists(media_path):
+        try:
+            if media_path.endswith(('.jpg', '.jpeg', '.png')):
+                photo = FSInputFile(media_path)
+                await callback.message.answer_photo(photo, caption=full_text, reply_markup=keyboard, parse_mode="HTML")
+            elif media_path.endswith(('.mp4', '.avi', '.mov')):
+                video = FSInputFile(media_path)
+                await callback.message.answer_video(video, caption=full_text, reply_markup=keyboard, parse_mode="HTML")
+            else:
+                await callback.message.edit_text(full_text + "\n📎 Файл прикреплен", reply_markup=keyboard, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Ошибка отправки медиафайла ответа на челлендж: {e}")
+            await callback.message.edit_text(full_text + "\n❌ Ошибка загрузки файла", reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await callback.message.edit_text(full_text, reply_markup=keyboard, parse_mode="HTML")
+
+@dp.callback_query(lambda c: c.data.startswith("approve_challenge_"))
+async def handle_approve_challenge(callback: CallbackQuery, state: FSMContext):
+    """Одобрение ответа на челлендж"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await callback.message.edit_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    submission_id = int(callback.data.replace("approve_challenge_", ""))
+    
+    success = await db.approve_challenge_submission(submission_id, user_id)
+    
+    if success:
+        # Получаем информацию об ответе для уведомления пользователя
+        submission = await db.get_challenge_submission_by_id(submission_id)
+        if submission:
+            # Отправляем уведомление пользователю через основной бот
+            main_bot = UserBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            challenge = await db.get_challenge_by_id(submission.challenge_id)
+            
+            try:
+                await main_bot.send_message(
+                    chat_id=submission.user_id,
+                    text=f"✅ <b>Ваш ответ одобрен!</b>\n\n"
+                         f"🏆 <b>{challenge.title if challenge else 'Челлендж'}</b>\n\n"
+                         f"Поздравляем! Ваш ответ на челлендж был одобрен модератором.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления пользователю {submission.user_id}: {e}")
+            finally:
+                try:
+                    await main_bot.session.close()
+                except:
+                    pass
+        
+        await callback.message.edit_text(
+            "✅ <b>Ответ одобрен!</b>\n\n"
+            "Пользователь получил уведомление.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="back_to_challenges_list")]
+            ]),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text("❌ Ошибка при одобрении ответа.")
+
+@dp.callback_query(lambda c: c.data.startswith("reject_challenge_"))
+async def handle_reject_challenge(callback: CallbackQuery, state: FSMContext):
+    """Отклонение ответа на челлендж"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await callback.message.edit_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    submission_id = int(callback.data.replace("reject_challenge_", ""))
+    
+    await state.update_data(rejecting_challenge_id=submission_id)
+    await state.set_state(ModerationStates.waiting_for_rejection_reason)
+    
+    await callback.message.edit_text(
+        "❌ <b>Отклонение ответа</b>\n\n"
+        "Введите причину отклонения:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"check_challenge_{submission_id}")]
+        ]),
+        parse_mode="HTML"
+    )
+
+@dp.message(ModerationStates.waiting_for_rejection_reason)
+async def handle_challenge_rejection_reason(message: Message, state: FSMContext):
+    """Обработка причины отклонения ответа на челлендж"""
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    submission_id = data.get('rejecting_challenge_id')
+    
+    if not submission_id:
+        await message.answer("❌ Ошибка: ответ не найден.")
+        await state.clear()
+        return
+    
+    reason = message.text.strip()
+    
+    if len(reason) < 5:
+        await message.answer("❌ Причина слишком короткая. Минимум 5 символов.")
+        return
+    
+    success = await db.reject_challenge_submission(submission_id, user_id, reason)
+    
+    if success:
+        # Получаем информацию об ответе для уведомления пользователя
+        submission = await db.get_challenge_submission_by_id(submission_id)
+        if submission:
+            # Отправляем уведомление пользователю через основной бот
+            main_bot = UserBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            challenge = await db.get_challenge_by_id(submission.challenge_id)
+            
+            try:
+                await main_bot.send_message(
+                    chat_id=submission.user_id,
+                    text=f"❌ <b>Ваш ответ отклонен</b>\n\n"
+                         f"🏆 <b>{challenge.title if challenge else 'Челлендж'}</b>\n\n"
+                         f"💬 <b>Причина:</b> {reason}\n\n"
+                         f"Вы можете отправить новый ответ.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления пользователю {submission.user_id}: {e}")
+            finally:
+                try:
+                    await main_bot.session.close()
+                except:
+                    pass
+        
+        await message.answer(
+            "❌ <b>Ответ отклонен</b>\n\n"
+            "Пользователь получил уведомление с причиной отклонения.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="back_to_challenges_list")]
+            ]),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("❌ Ошибка при отклонении ответа.")
+    
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data == "back_to_challenges_list")
+async def handle_back_to_challenges_list(callback: CallbackQuery, state: FSMContext):
+    """Возврат к списку ответов на челленджи"""
+    await callback.answer()
+    await handle_moderator_check_challenges(callback.message)
 
 @dp.message(F.text == "👥 Статистика пользователей")
 async def handle_admin_users(message: Message):
