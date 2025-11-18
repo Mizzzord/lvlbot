@@ -121,6 +121,7 @@ class PrizeManagementStates(StatesGroup):
     editing_achievement_value = State()
     editing_custom_condition = State()  # Новое состояние для редактирования произвольных условий
     editing_prize_emoji = State()
+    editing_subscription_level = State()  # Редактирование уровня подписки
     confirming_prize_edit = State()
 
 class UserSearchStates(StatesGroup):
@@ -157,6 +158,7 @@ def create_moderator_keyboard() -> ReplyKeyboardMarkup:
     """Создание клавиатуры для обычного модератора"""
     keyboard = [
         [KeyboardButton(text="📋 Проверить задания")],
+        [KeyboardButton(text="⭐ VIP очередь")],
         [KeyboardButton(text="✅ Одобрить задание")],
         [KeyboardButton(text="❌ Отклонить задание")],
         [KeyboardButton(text="📊 Статистика модерации")]
@@ -210,7 +212,7 @@ async def cmd_start(message: Message):
 
 @dp.message(lambda message: message.text == "📋 Проверить задания")
 async def handle_moderator_check_tasks(message: Message):
-    """Просмотр заданий на модерацию"""
+    """Просмотр обычных заданий на модерацию"""
     user_id = message.from_user.id
     logger.info(f"Пользователь {user_id} нажал 'Проверить задания'")
 
@@ -219,42 +221,141 @@ async def handle_moderator_check_tasks(message: Message):
         logger.warning(f"Пользователь {user_id} попытался получить доступ к модерации без прав")
         return
 
-    # Получаем задания на модерацию
-    pending_tasks = await db.get_pending_tasks_for_moderation(limit=10)
+    # Получаем обычные задания на модерацию (не VIP)
+    pending_tasks = await db.get_pending_tasks_for_moderation(limit=10, vip_only=False)
 
     if not pending_tasks:
         await message.answer(
             "📋 <b>Задания на модерацию</b>\n\n"
-            "✅ Все задания проверены!\n"
-            "Новых заданий на модерацию нет.",
+            "✅ Все обычные задания проверены!\n"
+            "Новых заданий на модерацию нет.\n\n"
+            "💡 Проверьте <b>⭐ VIP очередь</b> для приоритетных заданий.",
             parse_mode="HTML",
             reply_markup=create_moderator_keyboard()
         )
         return
 
-    text = "📋 <b>Задания на модерацию</b>\n\n"
+    text = "📋 <b>Обычные задания на модерацию</b>\n\n"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
 
-    for task_id, user_id, task_desc, media_path, user_name, nickname in pending_tasks[:5]:
-        player_name = nickname or user_name
-        short_desc = task_desc[:50] + "..." if len(task_desc) > 50 else task_desc
-        text += f"🎯 <b>ID {task_id}</b>: {player_name}\n"
-        text += f"   └ {short_desc}\n\n"
+    for task_data in pending_tasks[:5]:
+        # Обрабатываем как старый формат (6 элементов), так и новый (7 элементов с subscription_level)
+        if len(task_data) >= 6:
+            task_id, task_user_id, task_desc, media_path, user_name, nickname = task_data[:6]
+            player_name = nickname or user_name
+            short_desc = task_desc[:50] + "..." if len(task_desc) > 50 else task_desc
+            text += f"🎯 <b>ID {task_id}</b>: {player_name}\n"
+            text += f"   └ {short_desc}\n\n"
 
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(
-                text=f"📝 Проверить #{task_id}",
-                callback_data=f"check_task_{task_id}"
-            )
-        ])
-        logger.info(f"Добавлена кнопка check_task_{task_id} для модератора {user_id}")
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"📝 Проверить #{task_id}",
+                    callback_data=f"check_task_{task_id}"
+                )
+            ])
+            logger.info(f"Добавлена кнопка check_task_{task_id} для модератора {user_id}")
 
     keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="⭐ VIP очередь", callback_data="check_vip_tasks"),
         InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_moderator_menu")
     ])
 
     logger.info(f"Отправлено сообщение с клавиатурой модератору {user_id}")
     await message.answer(text, reply_markup=keyboard)
+
+@dp.message(lambda message: message.text == "⭐ VIP очередь")
+@dp.callback_query(lambda c: c.data == "check_vip_tasks")
+async def handle_moderator_check_vip_tasks(message_or_callback):
+    """Просмотр приоритетных VIP заданий на модерацию"""
+    # Определяем, это сообщение или callback
+    if isinstance(message_or_callback, CallbackQuery):
+        callback = message_or_callback
+        message = callback.message
+        user_id = callback.from_user.id
+        await callback.answer()
+    else:
+        message = message_or_callback
+        user_id = message.from_user.id
+    
+    logger.info(f"Пользователь {user_id} запросил VIP очередь")
+
+    if await get_user_role(user_id) != ModeratorRole.MODERATOR:
+        if isinstance(message_or_callback, CallbackQuery):
+            await message.edit_text("❌ У вас нет доступа к этой функции.")
+        else:
+            await message.answer("❌ У вас нет доступа к этой функции.")
+        logger.warning(f"Пользователь {user_id} попытался получить доступ к VIP очереди без прав")
+        return
+
+    # Получаем VIP задания на модерацию (уровень подписки >= 2)
+    vip_tasks = await db.get_vip_pending_tasks_for_moderation(limit=10)
+
+    if not vip_tasks:
+        text = (
+            "⭐ <b>VIP очередь заданий</b>\n\n"
+            "✅ Все приоритетные задания проверены!\n"
+            "Новых VIP заданий на модерацию нет.\n\n"
+            "💡 Проверьте <b>📋 Обычные задания</b>."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Обычные задания", callback_data="check_regular_tasks")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_moderator_menu")]
+        ])
+        
+        if isinstance(message_or_callback, CallbackQuery):
+            await message.edit_text(text, reply_markup=keyboard)
+        else:
+            await message.answer(text, reply_markup=keyboard)
+        return
+
+    text = "⭐ <b>VIP очередь заданий</b>\n\n"
+    text += "👑 <b>Приоритетные задания от пользователей с уровнем подписки 2+</b>\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+
+    for task_data in vip_tasks[:5]:
+        # Обрабатываем формат с subscription_level
+        if len(task_data) >= 6:
+            task_id, task_user_id, task_desc, media_path, user_name, nickname = task_data[:6]
+            subscription_level = task_data[6] if len(task_data) > 6 else None
+            
+            player_name = nickname or user_name
+            short_desc = task_desc[:50] + "..." if len(task_desc) > 50 else task_desc
+            
+            # Добавляем индикатор уровня подписки
+            level_emoji = ""
+            if subscription_level and subscription_level >= 2:
+                if subscription_level == 3:
+                    level_emoji = "👑"
+                elif subscription_level == 2:
+                    level_emoji = "💎"
+            
+            text += f"{level_emoji} <b>ID {task_id}</b>: {player_name}\n"
+            text += f"   └ {short_desc}\n\n"
+
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"⭐ Проверить #{task_id}",
+                    callback_data=f"check_task_{task_id}"
+                )
+            ])
+            logger.info(f"Добавлена кнопка check_task_{task_id} для VIP очереди модератора {user_id}")
+
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="📋 Обычные задания", callback_data="check_regular_tasks"),
+        InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_moderator_menu")
+    ])
+
+    logger.info(f"Отправлено сообщение с VIP очередью модератору {user_id}")
+    if isinstance(message_or_callback, CallbackQuery):
+        await message.edit_text(text, reply_markup=keyboard)
+    else:
+        await message.answer(text, reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data == "check_regular_tasks")
+async def handle_check_regular_tasks(callback: CallbackQuery):
+    """Переключение на обычные задания"""
+    await callback.answer()
+    await handle_moderator_check_tasks(callback.message)
 
 @dp.callback_query(lambda c: c.data.startswith("check_task_"))
 async def handle_check_task(callback: CallbackQuery, state: FSMContext):
@@ -271,10 +372,30 @@ async def handle_check_task(callback: CallbackQuery, state: FSMContext):
     user_name = task_details['name']
     nickname = task_details['nickname'] or user_name
     task_desc = task_details['task_description']
+    
+    # Проверяем уровень подписки пользователя для определения VIP статуса
+    user_id = task_details['user_id']
+    active_subscription = await db.get_active_subscription(user_id)
+    is_vip = False
+    vip_indicator = ""
+    subscription_level = None
+    
+    if active_subscription and active_subscription.subscription_level >= 2:
+        is_vip = True
+        subscription_level = active_subscription.subscription_level
+        if subscription_level == 3:
+            vip_indicator = "👑 VIP (Уровень 3)"
+        elif subscription_level == 2:
+            vip_indicator = "💎 VIP (Уровень 2)"
 
     # Формируем полный текст задания
-    full_text = f"📝 <b>Задание #{task_id}</b>\n\n"
+    full_text = f"📝 <b>Задание #{task_id}</b>"
+    if is_vip:
+        full_text += f" {vip_indicator}"
+    full_text += "\n\n"
     full_text += f"👤 <b>Игрок:</b> {nickname} ({user_name})\n"
+    if is_vip:
+        full_text += f"⭐ <b>Приоритетное задание</b>\n"
     full_text += f"🎯 <b>Задание:</b>\n{task_desc}\n\n"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -288,7 +409,10 @@ async def handle_check_task(callback: CallbackQuery, state: FSMContext):
     if media_path and os.path.exists(media_path):
         # Для медиафайлов используем короткий caption (ограничение 1024 символа)
         # Полное описание отправляем отдельным сообщением
-        short_caption = f"📝 <b>Задание #{task_id}</b>\n👤 <b>Игрок:</b> {nickname}\n📎 <b>Прикреплен файл</b>"
+        short_caption = f"📝 <b>Задание #{task_id}</b>"
+        if is_vip:
+            short_caption += f" {vip_indicator}"
+        short_caption += f"\n👤 <b>Игрок:</b> {nickname}\n📎 <b>Прикреплен файл</b>"
         
         # Если caption слишком длинный, обрезаем его
         if len(short_caption) > 1000:
@@ -678,37 +802,42 @@ async def handle_back_to_task_list(callback: CallbackQuery):
     """Возврат к списку заданий"""
     await callback.answer()
 
-    # Получаем задания на модерацию
-    pending_tasks = await db.get_pending_tasks_for_moderation(limit=10)
+    # Получаем обычные задания на модерацию
+    pending_tasks = await db.get_pending_tasks_for_moderation(limit=10, vip_only=False)
 
     if not pending_tasks:
         await callback.message.edit_text(
             "📋 <b>Задания на модерацию</b>\n\n"
-            "✅ Все задания проверены!\n"
-            "Новых заданий на модерацию нет.",
+            "✅ Все обычные задания проверены!\n"
+            "Новых заданий на модерацию нет.\n\n"
+            "💡 Проверьте <b>⭐ VIP очередь</b> для приоритетных заданий.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ VIP очередь", callback_data="check_vip_tasks")],
                 [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_moderator_menu")]
             ])
         )
         return
 
-    text = "📋 <b>Задания на модерацию</b>\n\n"
+    text = "📋 <b>Обычные задания на модерацию</b>\n\n"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
 
-    for task_id, user_id, task_desc, media_path, user_name, nickname in pending_tasks[:5]:
-        player_name = nickname or user_name
-        short_desc = task_desc[:50] + "..." if len(task_desc) > 50 else task_desc
-        text += f"🎯 <b>ID {task_id}</b>: {player_name}\n"
-        text += f"   └ {short_desc}\n\n"
+    for task_data in pending_tasks[:5]:
+        if len(task_data) >= 6:
+            task_id, task_user_id, task_desc, media_path, user_name, nickname = task_data[:6]
+            player_name = nickname or user_name
+            short_desc = task_desc[:50] + "..." if len(task_desc) > 50 else task_desc
+            text += f"🎯 <b>ID {task_id}</b>: {player_name}\n"
+            text += f"   └ {short_desc}\n\n"
 
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(
-                text=f"📝 Проверить #{task_id}",
-                callback_data=f"check_task_{task_id}"
-            )
-        ])
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"📝 Проверить #{task_id}",
+                    callback_data=f"check_task_{task_id}"
+                )
+            ])
 
     keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="⭐ VIP очередь", callback_data="check_vip_tasks"),
         InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_moderator_menu")
     ])
 
@@ -727,7 +856,9 @@ async def handle_moderator_stats(message: Message):
     stats = await db.get_moderator_stats(user_id)
 
     # Получаем количество заданий на проверку
-    pending_count = len(await db.get_pending_tasks_for_moderation(limit=1000))
+    regular_count = len(await db.get_pending_tasks_for_moderation(limit=1000, vip_only=False))
+    vip_count = len(await db.get_vip_pending_tasks_for_moderation(limit=1000))
+    total_pending = regular_count + vip_count
 
     text = "📊 <b>Статистика модерации</b>\n\n"
 
@@ -745,7 +876,9 @@ async def handle_moderator_stats(message: Message):
 
     # Общая статистика
     text += "📋 <b>Текущая очередь:</b>\n"
-    text += f"⏳ Заданий на проверку: {pending_count}"
+    text += f"⏳ Всего заданий: {total_pending}\n"
+    text += f"📋 Обычных: {regular_count}\n"
+    text += f"⭐ VIP: {vip_count}"
 
     await message.answer(text, reply_markup=create_moderator_keyboard())
 
@@ -1282,9 +1415,62 @@ async def handle_delete_blogger_prize(callback: CallbackQuery):
 
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
+@dp.callback_query(lambda c: c.data.startswith("edit_admin_prize_"))
+async def handle_edit_admin_prize_specific(callback: CallbackQuery, state: FSMContext):
+    """Редактирование конкретного приза для главного модератора"""
+    await callback.answer()
+    prize_id = int(callback.data.replace("edit_admin_prize_", ""))
+
+    # Проверяем права доступа
+    user_id = callback.from_user.id
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await callback.message.edit_text("❌ Доступ запрещен.")
+        return
+
+    prize = await db.get_prize_by_id(prize_id)
+    if not prize:
+        await callback.message.edit_text("❌ Приз не найден.")
+        return
+
+    # Сохраняем информацию о призе в состоянии
+    await state.update_data(
+        editing_prize_id=prize_id,
+        editing_prize=prize,
+        is_admin_edit=True  # Флаг для определения, что это редактирование админом
+    )
+
+    text = f"✏️ <b>Редактирование приза</b>\n\n"
+    text += f"🎁 <b>{prize.title}</b>\n"
+    text += f"📝 {prize.description or 'Без описания'}\n"
+    text += f"🎯 {get_achievement_description(prize.achievement_type, prize.achievement_value, prize.custom_condition)}\n"
+    text += f"😊 Эмодзи: {prize.emoji}\n"
+    
+    # Показываем уровень подписки, если установлен
+    if prize.subscription_level:
+        level_names = {1: "BASIC", 2: "PRIME", 3: "BASIC + PRIME"}
+        text += f"💎 Уровень подписки: {prize.subscription_level} ({level_names.get(prize.subscription_level, 'Неизвестно')})\n"
+    else:
+        text += f"💎 Уровень подписки: Для всех уровней\n"
+    
+    text += f"👑 Тип: {'Главный модератор' if prize.prize_type == PrizeType.ADMIN else 'Блогер'}\n"
+    if prize.referral_code:
+        text += f"📣 Реферальный код: {prize.referral_code}\n"
+    text += "\nЧто вы хотите изменить?"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏷️ Название", callback_data="edit_title")],
+        [InlineKeyboardButton(text="📝 Описание", callback_data="edit_description")],
+        [InlineKeyboardButton(text="🎯 Условие", callback_data="edit_achievement")],
+        [InlineKeyboardButton(text="😊 Эмодзи", callback_data="edit_emoji")],
+        [InlineKeyboardButton(text="💎 Уровень подписки", callback_data="edit_subscription_level")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin_prize_edit")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
 @dp.callback_query(lambda c: c.data.startswith("edit_prize_"))
 async def handle_edit_specific_prize(callback: CallbackQuery, state: FSMContext):
-    """Редактирование конкретного приза"""
+    """Редактирование конкретного приза блогера"""
     await callback.answer()
     prize_id = int(callback.data.replace("edit_prize_", ""))
 
@@ -1303,7 +1489,8 @@ async def handle_edit_specific_prize(callback: CallbackQuery, state: FSMContext)
     # Сохраняем информацию о призе в состоянии
     await state.update_data(
         editing_prize_id=prize_id,
-        editing_prize=prize
+        editing_prize=prize,
+        is_admin_edit=False  # Флаг для определения, что это редактирование блогером
     )
 
     text = f"✏️ <b>Редактирование приза</b>\n\n"
@@ -1424,10 +1611,78 @@ async def handle_edit_emoji(callback: CallbackQuery, state: FSMContext):
 async def handle_cancel_edit(callback: CallbackQuery, state: FSMContext):
     """Отмена редактирования приза"""
     await callback.answer()
+    data = await state.get_data()
+    is_admin_edit = data.get('is_admin_edit', False)
     await state.clear()
 
-    # Возвращаемся к выбору приза для редактирования
-    await handle_edit_blogger_prize(callback)
+    # Возвращаемся к выбору приза для редактирования в зависимости от роли
+    if is_admin_edit:
+        await handle_edit_prize(callback)
+    else:
+        await handle_edit_blogger_prize(callback)
+
+@dp.callback_query(lambda c: c.data == "cancel_admin_prize_edit")
+async def handle_cancel_admin_prize_edit(callback: CallbackQuery, state: FSMContext):
+    """Отмена редактирования приза админом"""
+    await callback.answer()
+    await state.clear()
+    await handle_edit_prize(callback)
+
+@dp.callback_query(lambda c: c.data == "edit_subscription_level")
+async def handle_edit_subscription_level(callback: CallbackQuery, state: FSMContext):
+    """Редактирование уровня подписки приза"""
+    await callback.answer()
+    
+    data = await state.get_data()
+    prize = data.get('editing_prize')
+    is_admin_edit = data.get('is_admin_edit', False)
+    
+    if not prize:
+        await callback.message.edit_text("❌ Ошибка: приз не найден.")
+        await state.clear()
+        return
+    
+    # Проверяем права доступа (только админ может редактировать уровень подписки)
+    if not is_admin_edit:
+        user_id = callback.from_user.id
+        if await get_user_role(user_id) != ModeratorRole.ADMIN:
+            await callback.message.edit_text("❌ Только главный модератор может редактировать уровень подписки.")
+            return
+    
+    current_level = prize.subscription_level
+    level_text = "Для всех уровней"
+    if current_level == 2:
+        level_text = "Для уровня 2 (PRIME)"
+    elif current_level == 3:
+        level_text = "Для уровня 3 (BASIC + PRIME)"
+    
+    text = f"✏️ <b>Редактирование уровня подписки</b>\n\n"
+    text += f"Текущий уровень: <b>{level_text}</b>\n\n"
+    text += "Выберите новый уровень подписки для приза:"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Для всех уровней", callback_data="edit_sub_level_none")],
+        [InlineKeyboardButton(text="💎 Уровень 2 (PRIME)", callback_data="edit_sub_level_2")],
+        [InlineKeyboardButton(text="👑 Уровень 3 (BASIC + PRIME)", callback_data="edit_sub_level_3")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data.startswith("edit_sub_level_"))
+async def handle_edit_subscription_level_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора уровня подписки при редактировании"""
+    await callback.answer()
+    
+    level_data = callback.data.replace("edit_sub_level_", "")
+    subscription_level = None
+    if level_data == "2":
+        subscription_level = 2
+    elif level_data == "3":
+        subscription_level = 3
+    
+    await state.update_data(editing_subscription_level=subscription_level)
+    await confirm_prize_edit(callback.message, state)
 
 @dp.callback_query(lambda c: c.data.startswith("edit_achievement_"))
 async def handle_edit_achievement_type(callback: CallbackQuery, state: FSMContext):
@@ -1602,6 +1857,11 @@ async def confirm_prize_edit(message, state: FSMContext):
         text += f"🎯 Условие: {old_achievement} → <b>{new_achievement}</b>\n"
     if 'editing_emoji' in data:
         text += f"😊 Эмодзи: {original_prize.emoji} → <b>{data['editing_emoji']}</b>\n"
+    if 'editing_subscription_level' in data:
+        level_names = {None: "Для всех уровней", 2: "Уровень 2 (PRIME)", 3: "Уровень 3 (BASIC + PRIME)"}
+        old_level = level_names.get(original_prize.subscription_level, "Для всех уровней")
+        new_level = level_names.get(data['editing_subscription_level'], "Для всех уровней")
+        text += f"💎 Уровень подписки: {old_level} → <b>{new_level}</b>\n"
 
     text += "\nПрименить эти изменения?"
 
@@ -1620,6 +1880,7 @@ async def handle_confirm_prize_edit(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     prize_id = data.get('editing_prize_id')
     original_prize = data.get('editing_prize')
+    is_admin_edit = data.get('is_admin_edit', False)
 
     if not prize_id or not original_prize:
         await callback.message.edit_text("❌ Ошибка: данные приза не найдены.")
@@ -1628,11 +1889,19 @@ async def handle_confirm_prize_edit(callback: CallbackQuery, state: FSMContext):
 
     # Проверяем права доступа
     user_id = callback.from_user.id
-    blogger = await db.get_blogger_by_telegram_id(user_id)
-    if not blogger or original_prize.referral_code != blogger['referral_code']:
-        await callback.message.edit_text("❌ Доступ запрещен.")
-        await state.clear()
-        return
+    if is_admin_edit:
+        # Для админа проверяем, что он действительно админ
+        if await get_user_role(user_id) != ModeratorRole.ADMIN:
+            await callback.message.edit_text("❌ Доступ запрещен.")
+            await state.clear()
+            return
+    else:
+        # Для блогера проверяем, что приз принадлежит ему
+        blogger = await db.get_blogger_by_telegram_id(user_id)
+        if not blogger or original_prize.referral_code != blogger['referral_code']:
+            await callback.message.edit_text("❌ Доступ запрещен.")
+            await state.clear()
+            return
 
     # Создаем обновленный объект приза
     updated_prize = Prize(
@@ -1645,6 +1914,7 @@ async def handle_confirm_prize_edit(callback: CallbackQuery, state: FSMContext):
         achievement_value=data.get('editing_achievement_value', original_prize.achievement_value),
         custom_condition=data.get('editing_custom_condition', original_prize.custom_condition),
         emoji=data.get('editing_emoji', original_prize.emoji),
+        subscription_level=data.get('editing_subscription_level', original_prize.subscription_level),  # Добавляем уровень подписки
         is_active=original_prize.is_active,
         created_at=original_prize.created_at,
         updated_at=int(datetime.datetime.now().timestamp())
@@ -1654,20 +1924,34 @@ async def handle_confirm_prize_edit(callback: CallbackQuery, state: FSMContext):
     success = await db.save_prize(updated_prize)
 
     if success:
+        # Определяем callback для возврата в зависимости от роли
+        if is_admin_edit:
+            back_callback = "back_to_admin_menu"
+            edit_another_callback = "edit_prize"
+        else:
+            back_callback = "back_to_blogger_menu"
+            edit_another_callback = "edit_blogger_prize"
+        
         await callback.message.edit_text(
             f"✅ <b>Приз успешно обновлен!</b>\n\n"
             f"🎁 <b>{updated_prize.title}</b>\n"
             f"✏️ Изменения применены",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎁 К управлению призами", callback_data="back_to_blogger_menu")],
-                [InlineKeyboardButton(text="✏️ Редактировать еще", callback_data="edit_blogger_prize")]
+                [InlineKeyboardButton(text="🎁 К управлению призами", callback_data=back_callback)],
+                [InlineKeyboardButton(text="✏️ Редактировать еще", callback_data=edit_another_callback)]
             ])
         )
     else:
+        # Определяем callback для возврата в зависимости от роли
+        if is_admin_edit:
+            back_callback = "edit_prize"
+        else:
+            back_callback = "edit_blogger_prize"
+        
         await callback.message.edit_text(
             "❌ Ошибка при обновлении приза.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="edit_blogger_prize")]
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]
             ])
         )
 
@@ -2197,16 +2481,67 @@ async def handle_cancel_prize_creation(callback: CallbackQuery, state: FSMContex
 
 @dp.callback_query(lambda c: c.data == "edit_prize")
 async def handle_edit_prize(callback: CallbackQuery):
-    """Редактирование приза"""
+    """Редактирование приза - выбор приза для главного модератора"""
     await callback.answer()
-    await callback.message.edit_text(
-        "📝 <b>Редактирование призов</b>\n\n"
-        "Функция редактирования призов находится в разработке.\n"
-        "Пока что вы можете удалить старый приз и создать новый.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
-        ])
-    )
+    
+    user_id = callback.from_user.id
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await callback.message.edit_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    # Получаем все призы (админские и блогерские)
+    admin_prizes = await db.get_prizes(prize_type=PrizeType.ADMIN, is_active=True)
+    blogger_prizes = await db.get_prizes(prize_type=PrizeType.BLOGGER, is_active=True)
+    
+    if not admin_prizes and not blogger_prizes:
+        await callback.message.edit_text(
+            "❌ Нет призов для редактирования.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")]
+            ])
+        )
+        return
+    
+    text = "✏️ <b>Выберите приз для редактирования:</b>\n\n"
+    
+    keyboard = []
+    
+    # Добавляем админские призы
+    if admin_prizes:
+        text += f"👑 <b>Призы главного модератора:</b>\n"
+        for prize in admin_prizes[:10]:  # Ограничиваем до 10 для удобства
+            level_text = ""
+            if prize.subscription_level:
+                level_text = f" [Ур.{prize.subscription_level}]"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{prize.emoji} {prize.title}{level_text}",
+                    callback_data=f"edit_admin_prize_{prize.id}"
+                )
+            ])
+        if len(admin_prizes) > 10:
+            text += f"... и еще {len(admin_prizes) - 10} призов\n"
+        text += "\n"
+    
+    # Добавляем блогерские призы
+    if blogger_prizes:
+        text += f"📣 <b>Призы блогеров:</b>\n"
+        for prize in blogger_prizes[:10]:  # Ограничиваем до 10 для удобства
+            level_text = ""
+            if prize.subscription_level:
+                level_text = f" [Ур.{prize.subscription_level}]"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{prize.emoji} {prize.title} ({prize.referral_code}){level_text}",
+                    callback_data=f"edit_admin_prize_{prize.id}"
+                )
+            ])
+        if len(blogger_prizes) > 10:
+            text += f"... и еще {len(blogger_prizes) - 10} призов\n"
+    
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin_menu")])
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
 @dp.callback_query(lambda c: c.data == "delete_prize")
 async def handle_delete_prize(callback: CallbackQuery, state: FSMContext):

@@ -2217,21 +2217,54 @@ class Database:
 
     # Методы для модерации заданий
 
-    async def get_pending_tasks_for_moderation(self, limit: int = 50) -> list[tuple]:
-        """Получение заданий, ожидающих модерации"""
+    async def get_pending_tasks_for_moderation(self, limit: int = 50, vip_only: bool = False) -> list[tuple]:
+        """Получение заданий, ожидающих модерации
+        
+        Args:
+            limit: Максимальное количество заданий
+            vip_only: Если True, возвращает только задания от пользователей с уровнем подписки >= 2
+        """
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute('''
-                SELECT dt.id, dt.user_id, dt.task_description, dt.submitted_media_path,
-                       u.name, ps.nickname
-                FROM daily_tasks dt
-                JOIN users u ON dt.user_id = u.telegram_id
-                LEFT JOIN player_stats ps ON dt.user_id = ps.user_id
-                WHERE dt.status = 'submitted'
-                ORDER BY dt.created_at ASC
-                LIMIT ?
-            ''', (limit,))
+            if vip_only:
+                # Получаем только VIP задания (уровень подписки >= 2)
+                current_timestamp = int(datetime.datetime.now().timestamp())
+                cursor = await db.execute('''
+                    SELECT dt.id, dt.user_id, dt.task_description, dt.submitted_media_path,
+                           u.name, ps.nickname, COALESCE(s.subscription_level, 1) as subscription_level
+                    FROM daily_tasks dt
+                    JOIN users u ON dt.user_id = u.telegram_id
+                    LEFT JOIN player_stats ps ON dt.user_id = ps.user_id
+                    LEFT JOIN subscriptions s ON u.telegram_id = s.user_id 
+                        AND s.status = 'active' 
+                        AND s.end_date > ?
+                    WHERE dt.status = 'submitted'
+                        AND COALESCE(s.subscription_level, 1) >= 2
+                    ORDER BY dt.created_at ASC
+                    LIMIT ?
+                ''', (current_timestamp, limit))
+            else:
+                # Получаем обычные задания (уровень подписки < 2 или без подписки)
+                cursor = await db.execute('''
+                    SELECT dt.id, dt.user_id, dt.task_description, dt.submitted_media_path,
+                           u.name, ps.nickname, COALESCE(s.subscription_level, 1) as subscription_level
+                    FROM daily_tasks dt
+                    JOIN users u ON dt.user_id = u.telegram_id
+                    LEFT JOIN player_stats ps ON dt.user_id = ps.user_id
+                    LEFT JOIN subscriptions s ON u.telegram_id = s.user_id 
+                        AND s.status = 'active' 
+                        AND s.end_date > ?
+                    WHERE dt.status = 'submitted'
+                        AND COALESCE(s.subscription_level, 1) < 2
+                    ORDER BY dt.created_at ASC
+                    LIMIT ?
+                ''', (int(datetime.datetime.now().timestamp()), limit))
+            
             rows = await cursor.fetchall()
-            return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in rows]
+            return [(row[0], row[1], row[2], row[3], row[4], row[5], row[6]) for row in rows]
+    
+    async def get_vip_pending_tasks_for_moderation(self, limit: int = 50) -> list[tuple]:
+        """Получение приоритетных заданий от VIP пользователей (уровень подписки >= 2)"""
+        return await self.get_pending_tasks_for_moderation(limit=limit, vip_only=True)
 
     async def get_task_details(self, task_id: int) -> Optional[dict]:
         """Получение детальной информации о задании"""
