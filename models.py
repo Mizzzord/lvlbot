@@ -174,6 +174,7 @@ class Challenge:
     created_at: int = 0  # timestamp создания
     expires_at: Optional[int] = None  # timestamp окончания (опционально)
     created_by: Optional[int] = None  # telegram_id администратора, создавшего челлендж
+    referral_code: Optional[str] = None  # реферальный код для таргетинга на аудиторию блогера
 
 @dataclass
 class ChallengeSubmission:

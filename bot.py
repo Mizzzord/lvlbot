@@ -244,10 +244,15 @@ async def improve_goal_with_ai(goal: str) -> str:
 async def show_main_menu(message_or_callback):
     """Показать главное меню пользователя"""
     keyboard = create_main_menu_keyboard()
-    
+
     # Определяем chat_id в зависимости от типа объекта
     if hasattr(message_or_callback, 'from_user'):
-        chat_id = message_or_callback.from_user.id
+        user = message_or_callback.from_user
+        chat_id = user.id
+        # Проверяем, что пользователь не является ботом
+        if user.is_bot:
+            logger.warning(f"Попытка показать главное меню боту: {chat_id}")
+            return
     elif hasattr(message_or_callback, 'chat'):
         chat_id = message_or_callback.chat.id
     else:
@@ -1942,6 +1947,11 @@ async def handle_subscription_confirmation(callback: CallbackQuery, state: FSMCo
     """Обработка подтверждения выбора уровня подписки"""
     await callback.answer()
     
+    # Проверяем, что пользователь не является ботом
+    if callback.from_user.is_bot:
+        logger.warning(f"Попытка подписки от бота: {callback.from_user.id}")
+        return
+
     # Получаем индекс уровня из callback_data
     level_index = int(callback.data.replace("sub_confirm_", ""))
     
@@ -2017,6 +2027,11 @@ async def handle_subscription_confirmation(callback: CallbackQuery, state: FSMCo
 async def check_payment_callback(callback: CallbackQuery, state: FSMContext):
     """Обработка проверки оплаты"""
     await callback.answer()
+
+    # Проверяем, что пользователь не является ботом
+    if callback.from_user.is_bot:
+        logger.warning(f"Попытка проверки платежа от бота: {callback.from_user.id}")
+        return
 
     payment_db_id = int(callback.data.replace("check_payment_", ""))
     logger.info(f"Проверка платежа ID: {payment_db_id} для пользователя {callback.from_user.id}")
@@ -2653,6 +2668,16 @@ async def handle_go_to_profile(callback: CallbackQuery, state: FSMContext):
     """Обработка перехода в профиль из команды /start"""
     await callback.answer()
     user_id = callback.from_user.id
+
+    # Проверяем, что пользователь не является ботом
+    if callback.from_user.is_bot:
+        logger.warning(f"Попытка доступа к профилю от бота: {user_id}")
+        await callback.message.answer(
+            "❌ <b>Ошибка</b>\n\n"
+            "Боты не могут использовать эту функцию.",
+            parse_mode="HTML"
+        )
+        return
     
     # Получаем данные пользователя
     user = await db.get_user(user_id)
@@ -2915,12 +2940,19 @@ async def handle_challenges(message: Message, state: FSMContext):
     """Обработка просмотра челленджей"""
     user_id = message.from_user.id
     
+    # Получаем данные пользователя для реферального кода
+    user = await db.get_user(user_id)
+    user_referral_code = user.referral_code if user else None
+    
     # Получаем активную подписку пользователя для определения уровня
     active_subscription = await db.get_active_subscription(user_id)
     subscription_level = active_subscription.subscription_level if active_subscription else None
     
-    # Получаем активные челленджи для уровня подписки пользователя
-    challenges = await db.get_active_challenges(subscription_level=subscription_level)
+    # Получаем активные челленджи для уровня подписки пользователя и его реферального кода
+    challenges = await db.get_active_challenges(
+        subscription_level=subscription_level,
+        user_referral_code=user_referral_code
+    )
     
     if not challenges:
         await message.answer(
@@ -2946,6 +2978,10 @@ async def handle_challenges(message: Message, state: FSMContext):
                 level_indicator = " 👑"
             elif challenge.subscription_level == 2:
                 level_indicator = " 💎"
+        
+        # Добавляем индикатор для челленджей от блогера
+        if challenge.referral_code:
+            level_indicator += " 📢"
         
         status_emoji = "✅" if existing_submission else "🎯"
         status_text = " (ответ отправлен)" if existing_submission else ""
@@ -3251,7 +3287,12 @@ async def handle_back_to_main_menu_from_challenges(callback: CallbackQuery, stat
     """Возврат в главное меню из челленджей"""
     await callback.answer()
     await state.set_state(UserRegistration.main_menu)
-    await callback.message.edit_text(
+    
+    # Удаляем сообщение с inline клавиатурой
+    await callback.message.delete()
+    
+    # Отправляем новое сообщение с Reply клавиатурой
+    await callback.message.answer(
         "🏠 <b>Главное меню</b>\n\n"
         "Выберите действие:",
         reply_markup=create_main_menu_keyboard(),
@@ -3765,6 +3806,11 @@ async def handle_change_goal(callback: CallbackQuery, state: FSMContext):
     """Обработка смены цели"""
     await callback.answer()
 
+    # Проверяем, что пользователь не является ботом
+    if callback.from_user.is_bot:
+        logger.warning(f"Попытка смены цели от бота: {callback.from_user.id}")
+        return
+
     await bot.send_message(
         chat_id=callback.from_user.id,
         text="🎯 <b>Смена цели</b>\n\n"
@@ -3807,6 +3853,11 @@ async def process_goal_change_confirmation(callback: CallbackQuery, state: FSMCo
     """Обработка подтверждения смены цели"""
     await callback.answer()
     
+    # Проверяем, что пользователь не является ботом
+    if callback.from_user.is_bot:
+        logger.warning(f"Попытка подтверждения смены цели от бота: {callback.from_user.id}")
+        return
+
     action = callback.data
     user_id = callback.from_user.id
     logger.info(f"process_goal_change_confirmation: callback.from_user.id = {user_id}, action = {action}")

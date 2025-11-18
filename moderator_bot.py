@@ -31,7 +31,6 @@ from config import BOT_TOKEN
 from database import Database
 from models import Prize, PrizeType, Rank, Subscription, SubscriptionStatus, Challenge, ChallengeSubmission, ChallengeSubmissionStatus
 from subscription_config import SUBSCRIPTION_LEVELS
-import datetime
 
 # Настройки логирования
 logging.basicConfig(
@@ -140,6 +139,7 @@ class BroadcastStates(StatesGroup):
 
 class ChallengeCreationStates(StatesGroup):
     waiting_for_challenge_type = State()  # Выбор типа челленджа (для всех или по уровню)
+    waiting_for_referral_code = State() # Ввод реферального кода блогера
     waiting_for_challenge_title = State()  # Ввод названия челленджа
     waiting_for_challenge_description = State()  # Ввод описания челленджа
     waiting_for_challenge_media = State()  # Загрузка медиафайла (опционально)
@@ -1278,7 +1278,7 @@ async def handle_confirm_broadcast(callback: CallbackQuery, state: FSMContext):
         return
     
     # Создаем экземпляр основного бота для отправки сообщений
-    main_bot = UserBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    main_bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     
     # Отправляем уведомление о начале рассылки
     await callback.message.edit_text(
@@ -1379,6 +1379,7 @@ async def handle_create_challenge(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🌐 Для всех пользователей", callback_data="challenge_type_all")],
         [InlineKeyboardButton(text="💎 Для уровня 2 (PRIME)", callback_data="challenge_type_2")],
         [InlineKeyboardButton(text="👑 Для уровня 3 (BASIC + PRIME)", callback_data="challenge_type_3")],
+        [InlineKeyboardButton(text="📢 Для аудитории блогера", callback_data="challenge_type_blogger")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_admin_menu")]
     ])
 
@@ -1394,13 +1395,27 @@ async def handle_challenge_type_selection(callback: CallbackQuery, state: FSMCon
     
     if challenge_type == "all":
         subscription_level = None
+        referral_code = None
         target_text = "всем пользователям"
     elif challenge_type == "2":
         subscription_level = 2
+        referral_code = None
         target_text = "пользователям с уровнем подписки 2 (PRIME)"
     elif challenge_type == "3":
         subscription_level = 3
+        referral_code = None
         target_text = "пользователям с уровнем подписки 3 (BASIC + PRIME)"
+    elif challenge_type == "blogger":
+        await callback.message.edit_text(
+            "🏆 <b>Создание челленджа</b>\n\n"
+            "Введите реферальный код блогера, для чьей аудитории будет доступен челлендж:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+            ])
+        )
+        await state.set_state(ChallengeCreationStates.waiting_for_referral_code)
+        return
     else:
         await callback.message.edit_text("❌ Неверный тип челленджа.")
         await state.clear()
@@ -1408,6 +1423,7 @@ async def handle_challenge_type_selection(callback: CallbackQuery, state: FSMCon
     
     await state.update_data(
         subscription_level=subscription_level,
+        referral_code=referral_code,
         target_text=target_text
     )
     
@@ -1416,6 +1432,50 @@ async def handle_challenge_type_selection(callback: CallbackQuery, state: FSMCon
     text += "Введите название челленджа:"
     
     await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+        ])
+    )
+    
+    await state.set_state(ChallengeCreationStates.waiting_for_challenge_title)
+
+@dp.message(ChallengeCreationStates.waiting_for_referral_code)
+async def handle_referral_code_input(message: Message, state: FSMContext):
+    """Обработка ввода реферального кода для челленджа"""
+    user_id = message.from_user.id
+    
+    if await get_user_role(user_id) != ModeratorRole.ADMIN:
+        await state.clear()
+        return
+    
+    referral_code = message.text.strip().upper()
+    
+    # Проверяем существование блогера
+    blogger = await db.get_blogger_by_referral_code(referral_code)
+    if not blogger:
+        await message.answer(
+            f"❌ Реферальный код '{referral_code}' не найден!\n"
+            "Пожалуйста, проверьте код и попробуйте снова:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
+            ])
+        )
+        return
+
+    target_text = f"аудитории блогера {blogger['full_name']} (код: {referral_code})"
+    
+    await state.update_data(
+        subscription_level=None,
+        referral_code=referral_code,
+        target_text=target_text
+    )
+    
+    text = f"🏆 <b>Создание челленджа</b>\n\n"
+    text += f"🎯 <b>Получатели:</b> {target_text}\n\n"
+    text += "Введите название челленджа:"
+    
+    await message.answer(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_challenge_creation")]
@@ -1510,11 +1570,11 @@ async def handle_challenge_media_upload(message: Message, state: FSMContext):
         # Определяем тип медиафайла и сохраняем его
         if message.photo:
             media_file = message.photo[-1]
-            file_name = f"{media_dir}/challenge_media_{user_id}_{int(datetime.datetime.now().timestamp())}.jpg"
+            file_name = f"{media_dir}/challenge_media_{user_id}_{int(datetime.now().timestamp())}.jpg"
         else:  # video
             media_file = message.video
             file_extension = media_file.file_name.split('.')[-1] if media_file.file_name else "mp4"
-            file_name = f"{media_dir}/challenge_media_{user_id}_{int(datetime.datetime.now().timestamp())}.mp4"
+            file_name = f"{media_dir}/challenge_media_{user_id}_{int(datetime.now().timestamp())}.mp4"
         
         # Скачиваем файл
         file_bytes = await bot.download(media_file.file_id)
@@ -1589,7 +1649,7 @@ async def handle_challenge_expires_input(message: Message, state: FSMContext):
             await message.answer("❌ Количество дней должно быть больше 0.")
             return
         
-        current_timestamp = int(datetime.datetime.now().timestamp())
+        current_timestamp = int(datetime.now().timestamp())
         expires_at = current_timestamp + (days * 24 * 60 * 60)
         
         await state.update_data(challenge_expires_at=expires_at)
@@ -1669,6 +1729,7 @@ async def handle_confirm_challenge_creation(callback: CallbackQuery, state: FSMC
     
     data = await state.get_data()
     subscription_level = data.get('subscription_level')
+    referral_code = data.get('referral_code')
     title = data.get('challenge_title', '')
     description = data.get('challenge_description', '')
     media_path = data.get('challenge_media_path')
@@ -1686,9 +1747,10 @@ async def handle_confirm_challenge_creation(callback: CallbackQuery, state: FSMC
         subscription_level=subscription_level,
         media_path=media_path,
         is_active=True,
-        created_at=int(datetime.datetime.now().timestamp()),
+        created_at=int(datetime.now().timestamp()),
         expires_at=expires_at,
-        created_by=user_id
+        created_by=user_id,
+        referral_code=referral_code
     )
     
     # Сохраняем челлендж в базу данных
@@ -1854,7 +1916,7 @@ async def handle_approve_challenge(callback: CallbackQuery, state: FSMContext):
         submission = await db.get_challenge_submission_by_id(submission_id)
         if submission:
             # Отправляем уведомление пользователю через основной бот
-            main_bot = UserBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            main_bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
             challenge = await db.get_challenge_by_id(submission.challenge_id)
             
             try:
@@ -1939,7 +2001,7 @@ async def handle_challenge_rejection_reason(message: Message, state: FSMContext)
         submission = await db.get_challenge_submission_by_id(submission_id)
         if submission:
             # Отправляем уведомление пользователю через основной бот
-            main_bot = UserBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            main_bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
             challenge = await db.get_challenge_by_id(submission.challenge_id)
             
             try:
@@ -2826,7 +2888,7 @@ async def handle_confirm_prize_edit(callback: CallbackQuery, state: FSMContext):
         subscription_level=data.get('editing_subscription_level', original_prize.subscription_level),  # Добавляем уровень подписки
         is_active=original_prize.is_active,
         created_at=original_prize.created_at,
-        updated_at=int(datetime.datetime.now().timestamp())
+        updated_at=int(datetime.now().timestamp())
     )
 
     # Сохраняем изменения
@@ -2911,7 +2973,7 @@ async def handle_cancel_blogger_prize(callback: CallbackQuery, state: FSMContext
     await state.clear()
 
     # Возвращаемся к управлению призами
-    await handle_blogger_prizes(callback.message)
+    await callback.message.answer("🎁 Функция управления призами блогера в разработке.")
 
 # Вспомогательные функции
 
@@ -2971,11 +3033,11 @@ async def handle_admin_callbacks(callback: CallbackQuery):
     action = callback.data.replace("admin_", "")
 
     if action == "prizes":
-        await handle_admin_prizes(callback.message)
+        await callback.message.answer("🎁 Функция управления призами в разработке")
     elif action == "users":
-        await handle_admin_users(callback.message)
+        await callback.message.answer("👥 Функция управления пользователями в разработке")
     elif action == "stats":
-        await handle_admin_general_stats(callback.message)
+        await callback.message.answer("📊 Функция просмотра статистики в разработке")
     else:
         await callback.message.answer("Функция в разработке")
 
@@ -3005,7 +3067,7 @@ async def handle_blogger_callbacks(callback: CallbackQuery):
     action = callback.data.replace("blogger_", "")
 
     if action == "prizes":
-        await handle_blogger_prizes(callback.message)
+        await callback.message.answer("🎁 Функция управления призами блогера в разработке")
     elif action == "stats":
         await handle_blogger_stats(callback.message)
     else:
@@ -3342,8 +3404,8 @@ async def handle_confirm_create_prize(callback: CallbackQuery, state: FSMContext
         subscription_level=data.get('prize_subscription_level'),  # Уровень подписки (None, 2 или 3)
         emoji=data.get('prize_emoji', '🎁'),
         is_active=True,
-        created_at=int(datetime.datetime.now().timestamp()),
-        updated_at=int(datetime.datetime.now().timestamp())
+        created_at=int(datetime.now().timestamp()),
+        updated_at=int(datetime.now().timestamp())
     )
 
     # Сохраняем в БД
@@ -4188,7 +4250,7 @@ async def handle_subscription_level_selection(callback: CallbackQuery, state: FS
     await state.set_state(SubscriptionGrantStates.confirming_subscription)
     
     # Вычисляем даты подписки
-    current_time = int(datetime.datetime.now().timestamp())
+    current_time = int(datetime.now().timestamp())
     subscription_start = current_time
     
     # Если есть активная подписка, суммируем время
@@ -4303,8 +4365,7 @@ async def handle_confirm_grant_subscription(callback: CallbackQuery, state: FSMC
             load_dotenv()
             main_bot_token = os.getenv("BOT_TOKEN")
             if main_bot_token:
-                from aiogram import Bot as UserBot
-                user_bot = UserBot(token=main_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+                user_bot = Bot(token=main_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
                 await user_bot.send_message(
                     target_user_id,
                     f"🎉 <b>Вам выдана подписка!</b>\n\n"

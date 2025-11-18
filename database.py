@@ -216,7 +216,8 @@ class Database:
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at INTEGER NOT NULL,
                     expires_at INTEGER,
-                    created_by INTEGER
+                    created_by INTEGER,
+                    referral_code TEXT -- Реферальный код для таргетинга (NULL для всех)
                 )
             ''')
 
@@ -704,6 +705,19 @@ class Database:
             try:
                 await db.execute(f'ALTER TABLE prizes ADD COLUMN {column_name} {column_type}')
                 logger.info(f"Колонка {column_name} добавлена в таблицу prizes")
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
+
+        # Поля для таблицы challenges
+        challenges_columns = [
+            ('referral_code', 'TEXT')
+        ]
+
+        for column_name, column_type in challenges_columns:
+            try:
+                await db.execute(f'ALTER TABLE challenges ADD COLUMN {column_name} {column_type}')
+                logger.info(f"Колонка {column_name} добавлена в таблицу challenges")
             except aiosqlite.OperationalError:
                 # Колонка уже существует
                 pass
@@ -2896,8 +2910,8 @@ class Database:
             if challenge.id is None:
                 # Создание нового челленджа
                 cursor = await db.execute('''
-                    INSERT INTO challenges (title, description, subscription_level, media_path, is_active, created_at, expires_at, created_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO challenges (title, description, subscription_level, media_path, is_active, created_at, expires_at, created_by, referral_code)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     challenge.title,
                     challenge.description,
@@ -2906,7 +2920,8 @@ class Database:
                     challenge.is_active,
                     challenge.created_at,
                     challenge.expires_at,
-                    challenge.created_by
+                    challenge.created_by,
+                    challenge.referral_code
                 ))
                 challenge.id = cursor.lastrowid
             else:
@@ -2918,7 +2933,8 @@ class Database:
                         subscription_level = ?,
                         media_path = ?,
                         is_active = ?,
-                        expires_at = ?
+                        expires_at = ?,
+                        referral_code = ?
                     WHERE id = ?
                 ''', (
                     challenge.title,
@@ -2927,6 +2943,7 @@ class Database:
                     challenge.media_path,
                     challenge.is_active,
                     challenge.expires_at,
+                    challenge.referral_code,
                     challenge.id
                 ))
             await db.commit()
@@ -2949,38 +2966,32 @@ class Database:
                     is_active=bool(row['is_active']),
                     created_at=row['created_at'],
                     expires_at=row['expires_at'],
-                    created_by=row['created_by']
+                    created_by=row['created_by'],
+                    referral_code=row['referral_code'] if 'referral_code' in row.keys() else None
                 )
             return None
     
-    async def get_active_challenges(self, subscription_level: Optional[int] = None) -> list[Challenge]:
+    async def get_active_challenges(self, subscription_level: Optional[int] = None, user_referral_code: Optional[str] = None) -> list[Challenge]:
         """Получение активных челленджей
         
         Args:
             subscription_level: Уровень подписки пользователя (None - для всех, 2 или 3 - для конкретного уровня)
+            user_referral_code: Реферальный код пользователя
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             current_timestamp = int(datetime.datetime.now().timestamp())
             
-            if subscription_level is None:
-                # Получаем челленджи для всех уровней (subscription_level IS NULL)
-                cursor = await db.execute('''
-                    SELECT * FROM challenges
-                    WHERE is_active = 1
-                        AND (expires_at IS NULL OR expires_at > ?)
-                        AND subscription_level IS NULL
-                    ORDER BY created_at DESC
-                ''', (current_timestamp,))
-            else:
-                # Получаем челленджи для конкретного уровня или для всех
-                cursor = await db.execute('''
-                    SELECT * FROM challenges
-                    WHERE is_active = 1
-                        AND (expires_at IS NULL OR expires_at > ?)
-                        AND (subscription_level = ? OR subscription_level IS NULL)
-                    ORDER BY created_at DESC
-                ''', (current_timestamp, subscription_level))
+            query = '''
+                SELECT * FROM challenges
+                WHERE is_active = 1
+                    AND (expires_at IS NULL OR expires_at > ?)
+                    AND (subscription_level IS NULL OR subscription_level = ?)
+                    AND (referral_code IS NULL OR referral_code = ?)
+                ORDER BY created_at DESC
+            '''
+            
+            cursor = await db.execute(query, (current_timestamp, subscription_level if subscription_level else None, user_referral_code))
             
             rows = await cursor.fetchall()
             challenges = []
@@ -2994,7 +3005,8 @@ class Database:
                     is_active=bool(row['is_active']),
                     created_at=row['created_at'],
                     expires_at=row['expires_at'],
-                    created_by=row['created_by']
+                    created_by=row['created_by'],
+                    referral_code=row['referral_code'] if 'referral_code' in row.keys() else None
                 ))
             return challenges
     
@@ -3019,7 +3031,8 @@ class Database:
                     is_active=bool(row['is_active']),
                     created_at=row['created_at'],
                     expires_at=row['expires_at'],
-                    created_by=row['created_by']
+                    created_by=row['created_by'],
+                    referral_code=row['referral_code'] if 'referral_code' in row.keys() else None
                 ))
             return challenges
     
