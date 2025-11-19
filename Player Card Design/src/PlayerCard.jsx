@@ -36,6 +36,7 @@ const PlayerCard = ({ data }) => {
       fontFamily: "'Roboto', sans-serif",
       backgroundColor: '#1a1a2e',
       color: '#fff',
+      borderRadius: '40px', // Закругленные углы карточки
     },
     background: {
       position: 'absolute',
@@ -67,6 +68,7 @@ const PlayerCard = ({ data }) => {
       bottom: '20px',
       border: `2px solid ${primaryColor}`,
       boxShadow: `inset 0 0 30px ${primaryColor}40`,
+      borderRadius: '30px', // Закругленные углы рамки
       zIndex: 3,
       pointerEvents: 'none',
     },
@@ -113,7 +115,7 @@ const PlayerCard = ({ data }) => {
         background: 'rgba(0,0,0,0.6)',
         backdropFilter: 'blur(10px)',
         padding: '15px 25px',
-        borderRadius: '16px',
+        borderRadius: '20px', // Более мягкие углы
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
@@ -151,7 +153,7 @@ const PlayerCard = ({ data }) => {
     statsContainer: {
         background: 'rgba(20, 20, 20, 0.85)', // Темно-серый фон
         backdropFilter: 'blur(15px)',
-        borderRadius: '24px',
+        borderRadius: '30px', // Более мягкие углы
         padding: '40px',
         border: `1px solid rgba(255, 255, 255, 0.1)`,
         borderTop: `4px solid ${primaryColor}`, // Оранжевая полоска сверху
@@ -174,7 +176,7 @@ const PlayerCard = ({ data }) => {
     progressBarBg: {
         height: '16px',
         background: 'rgba(255, 255, 255, 0.1)',
-        borderRadius: '8px',
+        borderRadius: '10px', // Более мягкие углы
         overflow: 'hidden',
         boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)',
     },
@@ -182,7 +184,7 @@ const PlayerCard = ({ data }) => {
         height: '100%',
         width: `${value}%`,
         background: `linear-gradient(90deg, ${secondaryColor} 0%, ${primaryColor} 100%)`, // Оранжевый градиент
-        borderRadius: '8px',
+        borderRadius: '10px', // Более мягкие углы
         boxShadow: `0 0 10px ${primaryColor}80`,
         transition: 'width 0.5s cubic-bezier(0.4, 0, 0.2, 1)',
     }),

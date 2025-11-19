@@ -16,8 +16,18 @@ function renderCard(data) {
   let photoUrl = '';
   if (data.photoPath) {
     try {
-      const absolutePath = path.resolve(data.photoPath);
+      let absolutePath = path.resolve(data.photoPath);
       
+      // Проверка существования по абсолютному пути
+      if (!fs.existsSync(absolutePath)) {
+          // Попытка найти относительно корня проекта, если путь пришел как 'player_photos/...'
+          const projectRoot = path.resolve(__dirname, '..');
+          const relativePath = path.join(projectRoot, data.photoPath);
+          if (fs.existsSync(relativePath)) {
+              absolutePath = relativePath;
+          }
+      }
+
       // Проверка безопасности: путь должен быть внутри разрешенных директорий
       const projectRoot = path.resolve(__dirname, '..');
       const allowedDirs = [
@@ -53,6 +63,9 @@ function renderCard(data) {
           console.warn(`Неподдерживаемый формат изображения: ${imageExtension}`);
           photoUrl = '';
         }
+      } else {
+          console.warn(`Файл не найден: ${absolutePath}`);
+          photoUrl = '';
       }
     } catch (error) {
       console.error(`Ошибка при обработке фото: ${error.message}`);
@@ -138,6 +151,7 @@ function renderCard(data) {
               fontFamily: "'Roboto', sans-serif",
               backgroundColor: '#1a1a2e',
               color: '#fff',
+              borderRadius: '40px', // Закругленные углы карточки
             },
             background: {
               position: 'absolute',
@@ -169,6 +183,7 @@ function renderCard(data) {
               bottom: '20px',
               border: \`2px solid \${primaryColor}\`,
               boxShadow: \`inset 0 0 30px \${primaryColor}40\`,
+              borderRadius: '30px', // Закругленные углы рамки
               zIndex: 3,
               pointerEvents: 'none',
             },
@@ -215,7 +230,7 @@ function renderCard(data) {
                 background: 'rgba(0,0,0,0.6)',
                 backdropFilter: 'blur(10px)',
                 padding: '15px 25px',
-                borderRadius: '16px',
+                borderRadius: '20px', // Более мягкие углы
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
@@ -253,7 +268,7 @@ function renderCard(data) {
             statsContainer: {
                 background: 'rgba(20, 20, 20, 0.85)', // Темно-серый фон
                 backdropFilter: 'blur(15px)',
-                borderRadius: '24px',
+                borderRadius: '30px', // Более мягкие углы
                 padding: '40px',
                 border: \`1px solid rgba(255, 255, 255, 0.1)\`,
                 borderTop: \`4px solid \${primaryColor}\`, // Оранжевая полоска сверху
@@ -276,7 +291,7 @@ function renderCard(data) {
             progressBarBg: {
                 height: '16px',
                 background: 'rgba(255, 255, 255, 0.1)',
-                borderRadius: '8px',
+                borderRadius: '10px', // Более мягкие углы
                 overflow: 'hidden',
                 boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)',
             },
@@ -284,7 +299,7 @@ function renderCard(data) {
                 height: '100%',
                 width: \`\${value}%\`,
                 background: \`linear-gradient(90deg, \${secondaryColor} 0%, \${primaryColor} 100%)\`, // Оранжевый градиент
-                borderRadius: '8px',
+                borderRadius: '10px', // Более мягкие углы
                 boxShadow: \`0 0 10px \${primaryColor}80\`,
                 transition: 'width 0.5s cubic-bezier(0.4, 0, 0.2, 1)',
             }),
@@ -306,22 +321,22 @@ function renderCard(data) {
               
               <div style={styles.content}>
                 <div style={styles.header}>
-                    <div style={styles.title}>Player Card</div>
+                    <div style={styles.title}>Карточка участника</div>
                     <div style={styles.nickname}>{nickname}</div>
                     
                     <div style={styles.mainStats}>
                          <div style={styles.mainStatBox}>
                             <div style={styles.mainStatValue}>{level}</div>
-                            <div style={styles.mainStatLabel}>Level</div>
+                            <div style={styles.mainStatLabel}>Уровень</div>
                          </div>
                          <div style={styles.mainStatBox}>
                             <div style={styles.mainStatValue}>{rank}</div>
-                            <div style={styles.mainStatLabel}>Rank</div>
+                            <div style={styles.mainStatLabel}>Ранг</div>
                          </div>
                          {ratingPosition && (
                              <div style={styles.mainStatBox}>
                                 <div style={styles.mainStatValue}>#{ratingPosition}</div>
-                                <div style={styles.mainStatLabel}>Rating</div>
+                                <div style={styles.mainStatLabel}>Рейтинг</div>
                              </div>
                          )}
                     </div>
@@ -352,7 +367,7 @@ function renderCard(data) {
                 </div>
                 
                 <div style={styles.footer}>
-                    Motivation Bot • System Generated
+                    Go Prime
                 </div>
               </div>
             </div>
@@ -376,7 +391,8 @@ app.post('/generate-card', async (req, res) => {
       nickname,
       level,
       rank,
-      experience
+      experience,
+      photoPath
     });
 
     // Валидация данных
