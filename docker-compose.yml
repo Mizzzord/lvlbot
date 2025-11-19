@@ -1,27 +1,31 @@
 version: "3.9"
 
-# Production конфигурация для развертывания на сервере
+# Docker Compose конфигурация для LVLBot
+# Основана на DEPLOYMENT.md и оптимизирована для продакшена
+
 services:
-  motivation-bot:
+  lvlbot:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: motivation-bot-prod
-    restart: always
+    container_name: lvlbot-prod
+    restart: unless-stopped
     
     # Переменные окружения из .env файла
     env_file:
       - .env
     
+    # Дополнительные переменные окружения
     environment:
       - TZ=Europe/Moscow
       - NODE_ENV=production
       - PYTHONUNBUFFERED=1
       - PORT=3000
       - LOG_LEVEL=INFO
+      - DOCKER_CONTAINER=true
     
     # Порты (только внутренние, без публикации наружу)
-    # Используйте reverse proxy (nginx/traefik) для доступа
+    # Используйте reverse proxy (nginx/traefik) для доступа извне
     ports:
       - "127.0.0.1:3000:3000"
     
@@ -32,18 +36,21 @@ services:
       - ./data/player_cards:/app/player_cards
       - ./data/task_submissions:/app/task_submissions
       - ./logs:/app/logs
+      - ./moderator_bot.log:/app/moderator_bot.log
     
     # Ограничения ресурсов для production
-    # Примечание: reservations не поддерживается в docker-compose 3.9
     deploy:
       resources:
         limits:
           cpus: '4.0'
           memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     
-    # Healthcheck
+    # Healthcheck (проверяет наличие всех процессов)
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "bash", "-c", "pgrep -f 'node.*server.js' > /dev/null && pgrep -f 'bot.py' > /dev/null && pgrep -f 'moderator_bot.py' > /dev/null"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -61,6 +68,12 @@ services:
     security_opt:
       - no-new-privileges:true
     
-    # Команда запуска
-    command: bash ./start-all.sh
+    # Сеть (опционально, для изоляции)
+    networks:
+      - lvlbot-network
+
+# Сеть для изоляции контейнера
+networks:
+  lvlbot-network:
+    driver: bridge
 
