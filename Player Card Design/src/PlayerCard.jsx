@@ -143,12 +143,12 @@ const PlayerCard = ({ data }) => {
         fontSize: '20px',
         fontFamily: "'Russo One', sans-serif",
         letterSpacing: '1px',
-        background: `rgba(255, 102, 0, 0.8)`, // Оранжевый фон
+        background: `rgba(255, 102, 0, 0.88)`, // Оранжевый фон
         display: 'inline-block',
         padding: '8px 20px',
         borderRadius: '20px',
         backdropFilter: 'blur(5px)',
-        boxShadow: '0 0 15px rgba(255, 102, 0, 0.4)',
+        boxShadow: '0 0 15px rgba(255, 102, 0, 0.38)',
     },
     statsContainer: {
         background: 'rgba(20, 20, 20, 0.85)', // Темно-серый фон
