@@ -4186,7 +4186,7 @@ async def handle_subscription_user_id_input(message: Message, state: FSMContext)
         )
         
         if user.subscription_active and user.subscription_end:
-            end_date = datetime.datetime.fromtimestamp(user.subscription_end).strftime('%d.%m.%Y')
+            end_date = datetime.fromtimestamp(user.subscription_end).strftime('%d.%m.%Y')
             user_info += f"📅 <b>Истекает:</b> {end_date}\n\n"
         
         user_info += "Выберите уровень подписки для выдачи:"
@@ -4264,7 +4264,7 @@ async def handle_subscription_level_selection(callback: CallbackQuery, state: FS
         subscription_end = subscription_start + new_subscription_duration
         action_text = "выдана"
     
-    end_date = datetime.datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')
+    end_date = datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')
     
     # Сохраняем данные для подтверждения
     await state.update_data(
@@ -4340,7 +4340,7 @@ async def handle_confirm_grant_subscription(callback: CallbackQuery, state: FSMC
         user = await db.get_user(target_user_id)
         user_name = user.name if user else f"Пользователь {target_user_id}"
         
-        end_date_str = datetime.datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')
+        end_date_str = datetime.fromtimestamp(subscription_end).strftime('%d.%m.%Y')
         
         await callback.message.edit_text(
             f"✅ <b>Подписка успешно выдана!</b>\n\n"

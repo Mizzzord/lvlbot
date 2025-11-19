@@ -1324,19 +1324,17 @@ async def handle_continue_payment(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    # Устанавливаем состояние для оплаты
+    # Устанавливаем состояние для оплаты и начинаем с первого уровня
     await state.set_state(UserRegistration.waiting_for_subscription)
+    await state.update_data(selected_level_index=0)  # Начинаем с первого уровня
     await callback.message.edit_text(
         f"💳 Продолжаем с оплатой подписки...\n\n"
         f"👤 Имя: {user.name}\n"
         f"🎯 Цель: {user.goal}\n\n"
-        f"💎 Выберите период подписки:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="1 месяц - 200₽", callback_data="sub_1")],
-            [InlineKeyboardButton(text="3 месяца - 1200₽", callback_data="sub_3")],
-            [InlineKeyboardButton(text="6 месяцев - 3000₽", callback_data="sub_6")],
-            [InlineKeyboardButton(text="12 месяцев - 4000₽", callback_data="sub_12")]
-        ])
+        f"💎 Выберите уровень подписки:\n\n"
+        f"{get_subscription_level_text(0)}",
+        parse_mode="HTML",
+        reply_markup=create_subscription_level_keyboard(0)
     )
 
 @router.callback_query(lambda c: c.data == "check_payment_status")

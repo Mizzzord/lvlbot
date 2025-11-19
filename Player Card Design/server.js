@@ -44,10 +44,10 @@ function renderCard(data) {
             console.warn(`Файл слишком большой: ${absolutePath} (${stats.size} байт)`);
             photoUrl = '';
           } else {
-      // Используем data URL для изображения
-      const imageBuffer = fs.readFileSync(absolutePath);
-      const imageBase64 = imageBuffer.toString('base64');
-      photoUrl = `data:image/${imageExtension};base64,${imageBase64}`;
+            // Используем data URL для изображения
+            const imageBuffer = fs.readFileSync(absolutePath);
+            const imageBase64 = imageBuffer.toString('base64');
+            photoUrl = `data:image/${imageExtension};base64,${imageBase64}`;
           }
         } else {
           console.warn(`Неподдерживаемый формат изображения: ${imageExtension}`);
@@ -69,6 +69,9 @@ function renderCard(data) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Player Card</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Russo+One&display=swap" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -79,7 +82,8 @@ function renderCard(data) {
             margin: 0;
             padding: 0;
             overflow: hidden;
-            font-family: Arial, sans-serif;
+            font-family: 'Roboto', sans-serif;
+            background: #000;
         }
         #root {
             width: 800px;
@@ -90,7 +94,6 @@ function renderCard(data) {
 <body>
     <div id="root"></div>
     <script>
-        // Встраиваем данные для клиентского рендеринга
         window.cardData = ${JSON.stringify(cardData)};
     </script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -98,8 +101,8 @@ function renderCard(data) {
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script type="text/babel">
         const { useState, useEffect } = React;
-        
-        function PlayerCard({ data }) {
+
+        const PlayerCard = ({ data }) => {
           const {
             photoPath,
             nickname,
@@ -111,197 +114,253 @@ function renderCard(data) {
           } = data;
 
           const statNames = {
-            strength: '💪 Сила',
-            agility: '🤸 Ловкость',
-            endurance: '🏃 Выносливость',
-            intelligence: '🧠 Интеллект',
-            charisma: '✨ Харизма'
+            strength: { label: 'СИЛА', icon: '💪' },
+            agility: { label: 'ЛОВКОСТЬ', icon: '⚡' },
+            endurance: { label: 'ВЫНОСЛИВОСТЬ', icon: '🛡️' },
+            intelligence: { label: 'ИНТЕЛЛЕКТ', icon: '🧠' },
+            charisma: { label: 'ХАРИЗМА', icon: '✨' }
           };
 
-          const getStatColor = (value) => {
-            if (value >= 80) return '#4ade80';
-            if (value >= 60) return '#60a5fa';
-            if (value >= 40) return '#fbbf24';
-            return '#f87171';
+          const formatNumber = (num) => num.toString().replace(/\\B(?=(\\d{3})+(?!\\d))/g, " ");
+          
+          // Основной цвет акцентов - оранжевый
+          const primaryColor = '#ff6600'; // Яркий оранжевый
+          const secondaryColor = '#e05500'; // Более темный оранжевый
+          const textColor = '#ffffff';
+          const dimColor = 'rgba(255,255,255,0.5)';
+
+          const styles = {
+            card: {
+              width: '800px',
+              height: '1200px',
+              position: 'relative',
+              overflow: 'hidden',
+              fontFamily: "'Roboto', sans-serif",
+              backgroundColor: '#1a1a2e',
+              color: '#fff',
+            },
+            background: {
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              // Используем фото пользователя как основной фон
+              backgroundImage: photoPath ? \`url(\${photoPath})\` : 'linear-gradient(135deg, #0f0c29, #302b63, #24243e)',
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+              zIndex: 1,
+            },
+            overlay: {
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              // Более темный градиент снизу для читаемости текста
+              background: 'linear-gradient(to bottom, rgba(0,0,0,0.3) 0%, rgba(0,0,0,0.6) 50%, #000000 100%)',
+              zIndex: 2,
+            },
+            borderFrame: {
+              position: 'absolute',
+              top: '20px',
+              left: '20px',
+              right: '20px',
+              bottom: '20px',
+              border: \`2px solid \${primaryColor}\`,
+              boxShadow: \`inset 0 0 30px \${primaryColor}40\`,
+              zIndex: 3,
+              pointerEvents: 'none',
+            },
+            content: {
+                position: 'absolute',
+                zIndex: 4,
+                width: '100%',
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                padding: '60px 40px',
+                boxSizing: 'border-box',
+            },
+            header: {
+                textAlign: 'center',
+                textShadow: '0 4px 10px rgba(0,0,0,0.8)',
+            },
+            title: {
+                fontFamily: "'Russo One', sans-serif",
+                fontSize: '24px',
+                letterSpacing: '4px',
+                color: primaryColor,
+                marginBottom: '10px',
+                textTransform: 'uppercase',
+            },
+            nickname: {
+                fontFamily: "'Russo One', sans-serif",
+                fontSize: '64px',
+                color: '#fff',
+                textTransform: 'uppercase',
+                letterSpacing: '2px',
+                textShadow: '0 0 20px rgba(0, 0, 0, 0.8)',
+                marginBottom: '20px',
+                lineHeight: '1.1',
+            },
+            mainStats: {
+                display: 'flex',
+                justifyContent: 'center',
+                gap: '30px',
+                marginTop: '30px',
+            },
+            mainStatBox: {
+                background: 'rgba(0,0,0,0.6)',
+                backdropFilter: 'blur(10px)',
+                padding: '15px 25px',
+                borderRadius: '16px',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                border: '1px solid rgba(255,255,255,0.1)',
+                minWidth: '130px',
+                boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
+            },
+            mainStatValue: {
+                fontFamily: "'Russo One', sans-serif",
+                fontSize: '42px',
+                color: primaryColor,
+                lineHeight: '1',
+                marginBottom: '5px',
+            },
+            mainStatLabel: {
+                fontSize: '14px',
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                color: 'rgba(255,255,255,0.7)',
+                fontWeight: '500',
+            },
+            xpText: {
+                marginTop: '25px', 
+                color: '#fff', 
+                fontSize: '20px',
+                fontFamily: "'Russo One', sans-serif",
+                letterSpacing: '1px',
+                background: \`rgba(255, 102, 0, 0.8)\`, // Оранжевый фон
+                display: 'inline-block',
+                padding: '8px 20px',
+                borderRadius: '20px',
+                backdropFilter: 'blur(5px)',
+                boxShadow: '0 0 15px rgba(255, 102, 0, 0.4)',
+            },
+            statsContainer: {
+                background: 'rgba(20, 20, 20, 0.85)', // Темно-серый фон
+                backdropFilter: 'blur(15px)',
+                borderRadius: '24px',
+                padding: '40px',
+                border: \`1px solid rgba(255, 255, 255, 0.1)\`,
+                borderTop: \`4px solid \${primaryColor}\`, // Оранжевая полоска сверху
+                marginTop: 'auto',
+                marginBottom: '40px',
+                boxShadow: '0 10px 40px rgba(0,0,0,0.6)',
+            },
+            statsRow: {
+                marginBottom: '28px',
+            },
+            statsHeader: {
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '12px',
+                fontFamily: "'Russo One', sans-serif",
+                fontSize: '22px',
+                color: '#fff',
+            },
+            progressBarBg: {
+                height: '16px',
+                background: 'rgba(255, 255, 255, 0.1)',
+                borderRadius: '8px',
+                overflow: 'hidden',
+                boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)',
+            },
+            progressBarFill: (value) => ({
+                height: '100%',
+                width: \`\${value}%\`,
+                background: \`linear-gradient(90deg, \${secondaryColor} 0%, \${primaryColor} 100%)\`, // Оранжевый градиент
+                borderRadius: '8px',
+                boxShadow: \`0 0 10px \${primaryColor}80\`,
+                transition: 'width 0.5s cubic-bezier(0.4, 0, 0.2, 1)',
+            }),
+            footer: {
+                textAlign: 'center',
+                color: 'rgba(255,255,255,0.4)',
+                fontSize: '16px',
+                letterSpacing: '3px',
+                textTransform: 'uppercase',
+                fontFamily: "'Russo One', sans-serif",
+            }
           };
 
-          const cardStyle = {
-            width: '800px',
-            height: '1200px',
-            position: 'relative',
-            overflow: 'hidden',
-            fontFamily: 'Arial, sans-serif',
-            backgroundImage: photoPath ? \`url(\${photoPath})\` : 'linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%)',
-            backgroundSize: 'cover',
-            backgroundPosition: 'center',
-            backgroundRepeat: 'no-repeat'
-          };
+          return (
+            <div style={styles.card}>
+              <div style={styles.background} />
+              <div style={styles.overlay} />
+              <div style={styles.borderFrame} />
+              
+              <div style={styles.content}>
+                <div style={styles.header}>
+                    <div style={styles.title}>Player Card</div>
+                    <div style={styles.nickname}>{nickname}</div>
+                    
+                    <div style={styles.mainStats}>
+                         <div style={styles.mainStatBox}>
+                            <div style={styles.mainStatValue}>{level}</div>
+                            <div style={styles.mainStatLabel}>Level</div>
+                         </div>
+                         <div style={styles.mainStatBox}>
+                            <div style={styles.mainStatValue}>{rank}</div>
+                            <div style={styles.mainStatLabel}>Rank</div>
+                         </div>
+                         {ratingPosition && (
+                             <div style={styles.mainStatBox}>
+                                <div style={styles.mainStatValue}>#{ratingPosition}</div>
+                                <div style={styles.mainStatLabel}>Rating</div>
+                             </div>
+                         )}
+                    </div>
+                    
+                    <div style={styles.xpText}>
+                        ⚡ {formatNumber(experience)} XP
+                    </div>
+                </div>
 
-          const overlayStyle = {
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            width: '100%',
-            height: '100%',
-            background: 'rgba(0, 0, 0, 0.6)',
-            backdropFilter: 'blur(2px)'
-          };
-
-          const topPanelStyle = {
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            width: '100%',
-            height: '180px',
-            background: 'rgba(0, 0, 0, 0.8)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '20px',
-            boxSizing: 'border-box'
-          };
-
-          const titleStyle = {
-            fontSize: '52px',
-            fontWeight: 'bold',
-            color: '#ffd700',
-            textShadow: '2px 2px 4px rgba(0, 0, 0, 0.8)',
-            marginBottom: '10px',
-            textAlign: 'center'
-          };
-
-          const nicknameStyle = {
-            fontSize: '42px',
-            fontWeight: 'bold',
-            color: '#ffffff',
-            textShadow: '2px 2px 4px rgba(0, 0, 0, 0.8)',
-            textAlign: 'center'
-          };
-
-          const infoPanelStyle = {
-            position: 'absolute',
-            top: '200px',
-            left: '40px',
-            width: '720px',
-            height: '120px',
-            background: 'rgba(0, 0, 0, 0.7)',
-            borderRadius: '10px',
-            padding: '20px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-            boxSizing: 'border-box'
-          };
-
-          const infoRowStyle = {
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            fontSize: '28px',
-            color: '#ffffff'
-          };
-
-          const statsPanelStyle = {
-            position: 'absolute',
-            top: '350px',
-            left: '40px',
-            width: '720px',
-            height: '550px',
-            background: 'rgba(0, 0, 0, 0.75)',
-            borderRadius: '10px',
-            padding: '20px',
-            boxSizing: 'border-box'
-          };
-
-          const statsTitleStyle = {
-            fontSize: '28px',
-            fontWeight: 'bold',
-            color: '#ffd700',
-            textAlign: 'center',
-            marginBottom: '30px'
-          };
-
-          const statRowStyle = {
-            marginBottom: '50px'
-          };
-
-          const statLabelStyle = {
-            fontSize: '26px',
-            color: '#ffffff',
-            marginBottom: '10px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center'
-          };
-
-          const progressBarContainerStyle = {
-            width: '100%',
-            height: '30px',
-            background: '#1e1e1e',
-            borderRadius: '15px',
-            border: '2px solid #b0c4de',
-            overflow: 'hidden',
-            position: 'relative'
-          };
-
-          const progressBarFillStyle = (value) => ({
-            height: '100%',
-            width: \`\${value}%\`,
-            background: \`linear-gradient(90deg, \${getStatColor(value)} 0%, \${getStatColor(value)}dd 100%)\`,
-            borderRadius: '13px',
-            transition: 'width 0.3s ease'
-          });
-
-          const footerStyle = {
-            position: 'absolute',
-            bottom: '30px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            fontSize: '18px',
-            color: '#999999',
-            textAlign: 'center'
-          };
-
-          return React.createElement('div', { style: cardStyle },
-            React.createElement('div', { style: overlayStyle }),
-            React.createElement('div', { style: topPanelStyle },
-              React.createElement('div', { style: titleStyle }, 'ИГРОВАЯ КАРТОЧКА'),
-              React.createElement('div', { style: nicknameStyle }, nickname)
-            ),
-            React.createElement('div', { style: infoPanelStyle },
-              React.createElement('div', { style: infoRowStyle },
-                React.createElement('span', null, \`📊 Уровень: \${level}\`),
-                React.createElement('span', { style: { color: '#ff8c00' } }, \`⭐ \${experience} XP\`)
-              ),
-              React.createElement('div', { style: infoRowStyle },
-                React.createElement('span', { style: { color: '#ffd700' } }, \`🏅 Ранг: \${rank}\`),
-                ratingPosition && React.createElement('span', { style: { color: '#b0c4de', fontSize: '24px' } }, \`🏆 #\${ratingPosition}\`)
-              )
-            ),
-            React.createElement('div', { style: statsPanelStyle },
-              React.createElement('div', { style: statsTitleStyle }, 'ХАРАКТЕРИСТИКИ'),
-              Object.entries(statNames).map(([key, label]) => {
-                const value = stats[key] || 50;
-                return React.createElement('div', { key, style: statRowStyle },
-                  React.createElement('div', { style: statLabelStyle },
-                    React.createElement('span', null, label),
-                    React.createElement('span', { style: { color: '#ffd700' } }, \`\${value}/100\`)
-                  ),
-                  React.createElement('div', { style: progressBarContainerStyle },
-                    React.createElement('div', { style: progressBarFillStyle(value) })
-                  )
-                );
-              })
-            ),
-            React.createElement('div', { style: footerStyle }, '© Motivation Bot')
+                <div style={styles.statsContainer}>
+                    {Object.entries(statNames).map(([key, conf]) => {
+                        const value = stats[key] || 0;
+                        return (
+                            <div key={key} style={styles.statsRow}>
+                                <div style={styles.statsHeader}>
+                                    <span style={{display: 'flex', alignItems: 'center', gap: '15px'}}>
+                                        <span style={{fontSize: '28px', filter: 'drop-shadow(0 0 5px rgba(0,0,0,0.5))'}}>{conf.icon}</span>
+                                        {conf.label}
+                                    </span>
+                                    <span style={{color: primaryColor}}>{value}/100</span>
+                                </div>
+                                <div style={styles.progressBarBg}>
+                                    <div style={styles.progressBarFill(value)} />
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+                
+                <div style={styles.footer}>
+                    Motivation Bot • System Generated
+                </div>
+              </div>
+            </div>
           );
-        }
+        };
         
-        ReactDOM.render(
-          React.createElement(PlayerCard, { data: window.cardData }),
-          document.getElementById('root')
-        );
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<PlayerCard data={window.cardData} />);
     </script>
 </body>
 </html>
@@ -447,4 +506,3 @@ app.get('/health', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Сервер генерации карточек запущен на порту ${PORT}`);
 });
-
