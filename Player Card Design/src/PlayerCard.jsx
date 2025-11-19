@@ -204,22 +204,22 @@ const PlayerCard = ({ data }) => {
       
       <div style={styles.content}>
         <div style={styles.header}>
-            <div style={styles.title}>Player Card</div>
+            <div style={styles.title}>Карточка участника</div>
             <div style={styles.nickname}>{nickname}</div>
             
             <div style={styles.mainStats}>
                  <div style={styles.mainStatBox}>
                     <div style={styles.mainStatValue}>{level}</div>
-                    <div style={styles.mainStatLabel}>Level</div>
+                    <div style={styles.mainStatLabel}>Уровень</div>
                  </div>
                  <div style={styles.mainStatBox}>
                     <div style={styles.mainStatValue}>{rank}</div>
-                    <div style={styles.mainStatLabel}>Rank</div>
+                    <div style={styles.mainStatLabel}>Ранг</div>
                  </div>
                  {ratingPosition && (
                      <div style={styles.mainStatBox}>
                         <div style={styles.mainStatValue}>#{ratingPosition}</div>
-                        <div style={styles.mainStatLabel}>Rating</div>
+                        <div style={styles.mainStatLabel}>Рейтинг</div>
                      </div>
                  )}
             </div>
@@ -250,7 +250,7 @@ const PlayerCard = ({ data }) => {
         </div>
         
         <div style={styles.footer}>
-            Motivation Bot • System Generated
+            Go Prime
         </div>
       </div>
     </div>
